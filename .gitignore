@@ -1,0 +1,6 @@
+*.json
+*.pkl
+*.npz
+*.mp4
+__pycache__/
+*.pyc
