@@ -1,0 +1,951 @@
+import json
+import os
+import cv2
+import argparse
+from pathlib import Path
+import base64
+import http.client
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import subprocess
+from tempfile import NamedTemporaryFile
+
+# API配置
+API_KEY = "sk-rXnFhVdisEL92jDqiCJelD36fonFQH6ogmoVKGeA0CRP3ubf"
+
+
+def extract_slice_number(json_filename):
+    """从JSON文件名中提取slice编号"""
+    parts = json_filename.split('_')
+    for part in parts:
+        if part.startswith('slice'):
+            slice_num = part.replace('slice', '').replace('.json', '')
+            return int(slice_num)
+    return 0
+
+
+def get_video_filename(json_filename):
+    """根据JSON文件名生成对应的视频文件名"""
+    video_name = json_filename.replace('.json', '')
+    if '_slice' in video_name:
+        video_name = video_name[:video_name.rfind('_slice')]
+    video_name = video_name.replace('_cAll_', '_c01_')
+    return video_name + '.mp4'
+
+
+def load_modifier_info(modifier_folder, json_filename):
+    """
+    加载对应的modifier JSON文件
+    
+    Args:
+        modifier_folder: modifier JSON文件夹路径
+        json_filename: 原始JSON文件名
+    
+    Returns:
+        modifier信息的字典，key为motion id
+    """
+    if modifier_folder is None:
+        return {}
+    
+    modifier_path = Path(modifier_folder) / json_filename
+    if not modifier_path.exists():
+        print(f"警告: 未找到modifier文件 {modifier_path}")
+        return {}
+    
+    try:
+        with open(modifier_path, 'r') as f:
+            modifier_data = json.load(f)
+        
+        # 转换为字典格式，方便查询
+        modifier_dict = {}
+        for item in modifier_data:
+            motion_id = item['motion']
+            modifier_dict[motion_id] = item.get('modifier', [])
+        
+        return modifier_dict
+    except Exception as e:
+        print(f"警告: 读取modifier文件出错: {e}")
+        return {}
+
+
+def format_modifier_text(modifiers):
+    """
+    将modifier列表格式化为交替的Pose和Trans格式
+    格式：Pose 1, Trans 1, Pose 2, Trans 2, ..., Pose N
+    Pose的数量比Trans多1个（最后总是以Pose结尾）
+    
+    Args:
+        modifiers: modifier文本列表
+    
+    Returns:
+        格式化后的文本
+    """
+    if not modifiers:
+        return ""
+    
+    formatted_lines = []
+    for i, modifier in enumerate(modifiers):
+        # 偶数索引（0, 2, 4, ...）是Pose，奇数索引（1, 3, 5, ...）是Trans
+        if i % 2 == 0:
+            # Pose: 第 i//2 + 1 个
+            pose_num = i // 2 + 1
+            formatted_lines.append(f"* **Pose {pose_num}:** {modifier}")
+        else:
+            # Trans: 第 i//2 + 1 个
+            trans_num = i // 2 + 1
+            formatted_lines.append(f"* **Trans {trans_num}:** {modifier}")
+    
+    return "\n".join(formatted_lines)
+
+
+def build_prompt_with_modifier(base_prompt, modifier_info):
+    """
+    构建包含modifier信息的完整prompt
+    
+    Args:
+        base_prompt: 基础prompt文本
+        modifier_info: modifier信息列表
+    
+    Returns:
+        完整的prompt
+    """
+    if not modifier_info:
+        return base_prompt
+    
+    # 格式化modifier文本
+    modifier_text = format_modifier_text(modifier_info)
+    
+    # 构建完整prompt
+    modifier_section = f"""
+---
+
+These pieces of information describe parts of the motion flow within this sequence. They can be useful references, as the relative joint positions are generally accurate. However, the overall action descriptions may contain errors or redundancy.
+
+For example, an error might occur when the system interprets a person who is jumping as if they were lying down.
+
+Therefore, when describing specific aspects—such as the position or movement of the arms—you may refer to these details for guidance, but do not rely on them entirely.
+
+{modifier_text}
+"""
+    
+    # 在"Your Answer"之前插入modifier信息
+    if "**Your Answer**" in base_prompt:
+        parts = base_prompt.split("**Your Answer**")
+        return parts[0] + modifier_section + "\n---\n\n**Your Answer**" + parts[1]
+    else:
+        # 如果没有找到"Your Answer"，直接追加
+        return base_prompt + modifier_section + "\n---\n\n**Your Answer**"
+
+
+def downsample_and_extract_frames(video_path, slice_number, target_frames=150):
+    """
+    更快版：从 60FPS 视频降采样到 30FPS（每两帧取一帧），并提取对应 slice 的帧
+    - 优先使用 cap.set(...) 跳到起始帧
+    - 使用 cap.grab() 跳过不需要解码的帧，只对要保存的帧调用 retrieve()
+    Returns: list of np.ndarray (BGR)
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"无法打开视频文件: {video_path}")
+
+    # 检查视频帧率是否为60FPS
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    assert abs(fps - 60.0) < 0.1, f"视频帧率应为60FPS，实际为{fps}FPS: {video_path}"
+
+    # 计算起始帧（60fps 视频，取每两帧中的一帧，相当于以 30fps 取帧）
+    # 原表达式 0.5 * slice_number * 30 * 2 == slice_number * 30
+    start_frame_60fps = int(slice_number * 30)
+
+    # 获取总帧数（某些容器/编解码器返回 -1 或 0，需要兼容）
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    # 若知道总帧数，提前做越界检查
+    if total_frames > 0 and start_frame_60fps >= total_frames:
+        # 起始帧在视频之外，直接返回空并给警告
+        print(f"警告: start_frame ({start_frame_60fps}) >= 视频总帧数 ({total_frames})")
+        cap.release()
+        return []
+
+    frames = []
+    extracted = 0
+
+    # 先尝试直接 seek 到起始帧（比从头读快很多）
+    seek_ok = False
+    try:
+        # 设置为 60fps 下的帧索引
+        seek_ok = cap.set(cv2.CAP_PROP_POS_FRAMES, float(start_frame_60fps))
+        # 有些后端即使返回 True 也不保证精确定位，但大多数情况有明显加速
+    except Exception:
+        seek_ok = False
+
+    if seek_ok:
+        # 使用 grab/retrieve：每两个 grab() 取一次 retrieve()
+        # 注意：grab() 前进一帧但不解码，retrieve() 解码当前帧
+        while extracted < target_frames:
+            # 第一次 grab：跳过（或到第一个候选帧）
+            ok = cap.grab()
+            if not ok:
+                # 视频结束或出错
+                # print(f"警告: 在提取 {extracted} 帧后视频结束（grab失败）")
+                break
+
+            # 第二次 grab：到下一帧（我们希望 decode 这一帧）
+            ok = cap.grab()
+            if not ok:
+                # 如果第二次 grab 失败，尝试 retrieve 前一帧（部分后端可能仍可 retrieve）
+                # 尝试 retrieve（技术上 retrieve 应在 grab 之后）
+                try:
+                    ok_ret, frame = cap.retrieve()
+                    if ok_ret:
+                        frames.append(frame)
+                        extracted += 1
+                except Exception:
+                    pass
+                break
+
+            # decode current frame
+            ok_ret, frame = cap.retrieve()
+            if not ok_ret or frame is None:
+                # retrieve 失败，结束循环
+                break
+
+            frames.append(frame)
+            extracted += 1
+
+    else:
+        # 回退：如果 seek 不可靠，就从头读并按原逻辑按 index 过滤（较慢）
+        # 但我们仍然尽量跳到 start_frame 处通过读取并丢弃前面的帧
+        frame_count = 0
+        extracted_count = 0
+
+        # 先快速跳过到 start_frame（通过 grab 更快）
+        while frame_count < start_frame_60fps:
+            if not cap.grab():
+                break
+            frame_count += 1
+
+        # 然后使用 grab/retrieve 每两帧抓取一个
+        while extracted_count < target_frames:
+            # 跳过一帧
+            if not cap.grab():
+                print(f"警告: 视频在提取{extracted_count}帧前结束")
+                break
+            # 抓取并 decode 下一帧
+            if not cap.grab():
+                print(f"警告: 视频在提取{extracted_count}帧前结束 (第二次 grab 失败)")
+                break
+            ok_ret, frame = cap.retrieve()
+            if not ok_ret or frame is None:
+                print(f"警告: retrieve 失败，在已抓取 {extracted_count} 帧时")
+                break
+            frames.append(frame)
+            extracted_count += 1
+
+    cap.release()
+    return frames
+
+
+
+def create_segment_video_in_memory(frames, segment_info, fps=1, use_ffmpeg=True, ffmpeg_timeout=120):
+    """
+    将指定帧段编码为 MP4 并返回 bytes（优先尝试使用 ffmpeg 流式编码，失败则回退到临时文件写入）
+    原因：gemini api只接受合法的mp4视频。
+    Args:
+        frames: list of numpy.ndarray (BGR) 所有帧
+        segment_info: dict 包含 'start_frame' 和 'end_frame'（索引基于 frames 列表）
+        fps: 输出视频的帧率（默认 1）
+        use_ffmpeg: 是否尝试使用 ffmpeg 流式方式（默认 True）
+        ffmpeg_timeout: 使用 ffmpeg 时的最大等待秒数（proc.communicate 的 timeout）
+
+    Returns:
+        bytes: MP4 二进制数据
+
+    Raises:
+        ValueError: 当片段为空或参数无效时
+        RuntimeError: 当编码失败（两种方法均失败）时
+    """
+    
+    # 规范化并裁剪索引
+    start_idx = int(segment_info.get('start_frame', 0))
+    end_idx = int(segment_info.get('end_frame', 0))
+
+    if start_idx < 0:
+        start_idx = 0
+    if end_idx < 0:
+        end_idx = 0
+    if start_idx >= len(frames):
+        raise ValueError(f"start_frame ({start_idx}) >= 总帧数 ({len(frames)})")
+    end_idx = min(end_idx, len(frames))
+    if end_idx <= start_idx:
+        raise ValueError(f"end_frame ({end_idx}) <= start_frame ({start_idx}) -> 片段为空")
+
+    segment_frames = frames[start_idx:end_idx]
+    if not segment_frames:
+        raise ValueError("片段为空")
+
+    # 获取宽高并确保为 int
+    h, w = segment_frames[0].shape[:2]
+    out_bytes = None
+
+    # ---- 方法 A: 使用 ffmpeg 流式写入（不落盘） ----
+    if use_ffmpeg:
+        # ffmpeg 命令（接受 rawvideo bgr24 从 stdin）
+        cmd = [
+            "ffmpeg",
+            "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{w}x{h}",
+            "-r", str(fps),
+            "-i", "-",                     # 从 stdin 读取原始帧
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "frag_keyframe+empty_moov",
+            "-f", "mp4",
+            "pipe:1"                        # 输出到 stdout
+        ]
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            try:
+                # 将每帧的原始 bytes 发送到 stdin
+                for frm in segment_frames:
+                    # 确保是 contiguous bytes
+                    proc.stdin.write(frm.tobytes())
+                proc.stdin.close()
+
+                out_bytes, err = proc.communicate(timeout=ffmpeg_timeout)
+                if proc.returncode != 0:
+                    # ffmpeg 失败 -> 抛出以触发回退
+                    err_msg = err.decode(errors="ignore") if isinstance(err, (bytes, bytearray)) else str(err)
+                    raise RuntimeError(f"ffmpeg 编码失败 (rc={proc.returncode}): {err_msg}")
+
+                # 成功：返回 bytes
+                return out_bytes
+
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("ffmpeg 超时（已 kill 进程）")
+
+            except BrokenPipeError:
+                # ffmpeg 可能因为参数问题提前退出导致 BrokenPipe
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("写入 ffmpeg stdin 时 BrokenPipe（ffmpeg 可能提前退出）")
+
+        except FileNotFoundError:
+            # ffmpeg 未安装，回退到临时文件实现
+            pass
+        except Exception as e:
+            # 任何 ffmpeg 路径错误都回退
+            # 但保留错误信息供日志/调试
+            # print(f"[DEBUG] ffmpeg 方法失败，回退：{e}")
+            pass
+
+    # ---- 方法 B: 回退到临时文件 + cv2.VideoWriter（兼容、稳妥） ----
+    temp_path = None
+    try:
+        with NamedTemporaryFile(suffix=".mp4", delete=False) as tmpf:
+            temp_path = tmpf.name
+
+        # 使用 cv2 写入临时文件
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(temp_path, fourcc, float(fps), (w, h))
+        if not writer.isOpened():
+            # 在某些平台，mp4v 可能不可用 -> 尝试其它 fourcc 或抛错
+            writer.release()
+            raise RuntimeError("cv2.VideoWriter 无法打开 (尝试 mp4v 失败)")
+
+        for frm in segment_frames:
+            writer.write(frm)
+        writer.release()
+
+        # 读取并返回 bytes
+        with open(temp_path, 'rb') as f:
+            out_bytes = f.read()
+
+        return out_bytes
+
+    except Exception as e:
+        raise RuntimeError(f"编码片段失败（ffmpeg 与临时文件回退均失败）：{e}")
+
+    finally:
+        # 清理临时文件（如果存在）
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+
+
+def check_response_domains(response_text, required_domains=None):
+    """
+    检查Gemini回复是否包含所有必需的域（domain）
+    
+    Args:
+        response_text: Gemini的回复文本
+        required_domains: 必需的域列表，默认为 ['whole body', 'lower half body', 'upper half body', 'torso']
+    
+    Returns:
+        (is_valid, missing_domains): is_valid为True表示所有域都存在，missing_domains为缺失的域列表
+    """
+    if required_domains is None:
+        required_domains = ['whole body', 'lower half body', 'upper half body', 'torso']
+    
+    missing_domains = []
+    
+    for domain in required_domains:
+        # 检查是否包含 **domain** 格式（不区分大小写）
+        pattern = f"**{domain}**"
+        if pattern.lower() not in response_text.lower():
+            missing_domains.append(domain)
+    
+    is_valid = len(missing_domains) == 0
+    return is_valid, missing_domains
+
+
+def call_gemini_api(video_bytes, prompt):
+    """
+    调用Gemini 2.5 Pro API分析视频
+    
+    Args:
+        video_bytes: 视频的字节数据
+        prompt: 提示词
+    
+    Returns:
+        模型的文本回复
+    """
+    try:
+        # 直接对字节数据进行Base64编码
+        video_b64 = base64.b64encode(video_bytes).decode("utf-8")
+        
+        # 构建API请求
+        conn = http.client.HTTPSConnection("jeniya.top")
+        payload = json.dumps({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "video/mp4",
+                                "data": video_b64
+                            }
+                        },
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+        })
+        
+        headers = {
+            'Authorization': f'Bearer {API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        
+        # 发送请求
+        conn.request("POST", "/v1beta/models/gemini-2.5-pro:generateContent", payload, headers)
+        res = conn.getresponse()
+        data = res.read()
+        response_json_str = data.decode("utf-8")
+        
+        # 解析响应
+        try:
+            response_dict = json.loads(response_json_str)
+            candidates = response_dict.get("candidates", [])
+            if not candidates:
+                raise ValueError("No candidates found in response.")
+            
+            first_candidate = candidates[0]
+            content_parts = first_candidate.get("content", {}).get("parts", [])
+            
+            # 拼接所有parts的文本
+            model_text = "".join([part.get("text", "") for part in content_parts])
+            return model_text
+            
+        except Exception as e:
+            error_msg = f"解析模型回复出错: {e}\n\nRaw response: {response_json_str}"
+            return error_msg
+        
+    except Exception as e:
+        error_msg = f"API调用出错: {e}"
+        return error_msg
+
+
+def process_single_segment(frames, segment, base_prompt, modifier_info, max_retries=5, required_domains=None):
+    """
+    处理单个视频片段：创建视频字节数据、构建prompt、调用API、返回结果
+    如果回复缺少必需的域，会自动重试
+    
+    Args:
+        frames: 所有帧的列表
+        segment: 片段信息字典
+        base_prompt: 基础提示词
+        modifier_info: 该segment的modifier信息
+        max_retries: 最大重试次数（默认5次）
+        required_domains: 必需的域列表（默认为 ['whole body', 'lower half body', 'upper half body', 'torso']）
+    
+    Returns:
+        (motion_id, success, response_text, error_message)
+    """
+    motion_id = segment['motion']
+    
+    try:
+        # 1. 构建包含modifier的完整prompt
+        full_prompt = build_prompt_with_modifier(base_prompt, modifier_info)
+        print(f'Segment {motion_id}: 已创建完成full_prompt！')
+        
+        # 2. 创建视频片段字节数据（1 FPS）
+        video_bytes = create_segment_video_in_memory(frames, segment, fps=1)
+        print(f'Segment {motion_id}: 已创建完成video_bytes！')
+        
+        # 3. 调用Gemini API，带重试机制
+        model_response = None
+        for attempt in range(1, max_retries + 1):
+            model_response = call_gemini_api(video_bytes, full_prompt)
+            print(f'Segment {motion_id}: 完成第{attempt}次API调用！')
+            
+            # 检查回复是否包含所有必需的域
+            is_valid, missing_domains = check_response_domains(model_response, required_domains)
+            
+            if is_valid:
+                print(f'Segment {motion_id}: 验证通过，所有域都存在！')
+                break
+            else:
+                print(f'Segment {motion_id}: 第{attempt}次尝试缺少域: {missing_domains}')
+                
+                if attempt == max_retries:
+                    # 达到最大重试次数，记录警告但仍返回最后的回复
+                    warning_msg = f"[警告] 经过{max_retries}次尝试仍缺少域: {missing_domains}"
+                    print(f'Segment {motion_id}: {warning_msg}')
+                    # 将警告添加到回复中
+                    model_response = f"{warning_msg}\n\n{model_response}"
+        
+        return (motion_id, True, model_response, None)
+        
+    except Exception as e:
+        error_msg = f"处理 segment{motion_id} 出错: {e}"
+        return (motion_id, False, None, error_msg)
+
+
+def process_json_file(json_path, video_folder, output_folder, base_prompt, modifier_folder, max_workers=5, max_retries=5, required_domains=None):
+    """
+    处理单个JSON文件
+    
+    Args:
+        json_path: JSON文件路径
+        video_folder: 原始视频文件夹
+        output_folder: 输出文件夹
+        base_prompt: 基础提示词
+        modifier_folder: modifier JSON文件夹
+        max_workers: 最大并发数
+        max_retries: API调用最大重试次数（默认5次）
+        required_domains: 必需的域列表（默认为 ['whole body', 'lower half body', 'upper half body', 'torso']）
+    """
+    json_path = Path(json_path)
+    video_folder = Path(video_folder)
+    output_folder = Path(output_folder)
+    
+    # 创建输出文件夹
+    output_folder.mkdir(parents=True, exist_ok=True)
+    
+    # 读取JSON文件
+    with open(json_path, 'r') as f:
+        segments = json.load(f)
+    
+    print(f"\n{'='*80}")
+    print(f"处理JSON文件: {json_path.name}")
+    print(f"找到 {len(segments)} 个片段")
+    
+    # 加载modifier信息（包含key_frame等额外信息）
+    modifier_data = None
+    if modifier_folder:
+        modifier_path = Path(modifier_folder) / json_path.name
+        if modifier_path.exists():
+            with open(modifier_path, 'r') as f:
+                modifier_data = json.load(f)
+            print(f"已加载modifier信息文件")
+    
+    # 提取slice编号
+    slice_number = extract_slice_number(json_path.name)
+    print(f"Slice编号: {slice_number}")
+    
+    # 获取对应的视频文件名
+    video_filename = get_video_filename(json_path.name)
+    video_path = video_folder / video_filename
+    
+    print(f"视频文件: {video_filename}")
+    
+    if not video_path.exists():
+        raise FileNotFoundError(f"视频文件不存在: {video_path}")
+    
+    # 提取并降采样帧
+    print(f"从帧 {int(0.5 * slice_number * 30 * 2)} 开始提取150帧...")
+    frames = downsample_and_extract_frames(video_path, slice_number, target_frames=150)
+    # print(f"成功提取 {len(frames)} 帧")
+    assert len(frames) == 150, f"预期提取150帧，但实际提取了{len(frames)}帧"
+    # 构建modifier字典（用于提取modifier列表）
+    modifier_dict = {}
+    modifier_full_dict = {}  # 保存完整的modifier数据
+    if modifier_data:
+        for item in modifier_data:
+            motion_id = item['motion']
+            modifier_dict[motion_id] = item.get('modifier', [])
+            modifier_full_dict[motion_id] = item
+    
+    print(f"\n开始处理 {len(segments)} 个片段 (并发数: {max_workers})...")
+    
+    # 并行处理所有segments，收集结果
+    results = {}
+    print_lock = Lock()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for segment in segments:
+            future = executor.submit(
+                process_single_segment, 
+                frames, 
+                segment, 
+                base_prompt, 
+                modifier_dict.get(segment['motion'], []),
+                max_retries,
+                required_domains
+            )
+            futures[future] = segment['motion']
+        
+        completed = 0
+        for future in as_completed(futures):
+            motion_id, success, response_text, error_msg = future.result()
+            completed += 1
+            
+            if success:
+                results[motion_id] = response_text
+                with print_lock:
+                    print(f"[{completed}/{len(segments)}] ✓ Segment {motion_id} 处理完成")
+            else:
+                results[motion_id] = f"Error: {error_msg}"
+                with print_lock:
+                    print(f"[{completed}/{len(segments)}] ✗ Segment {motion_id} 处理失败: {error_msg}")
+    
+    # 构建输出JSON
+    output_data = []
+    for segment in segments:
+        motion_id = segment['motion']
+        output_item = {
+            "motion": motion_id,
+            "start_frame": segment['start_frame'],
+            "end_frame": segment['end_frame']
+        }
+        
+        # 如果有modifier数据，添加key_frame
+        if motion_id in modifier_full_dict:
+            output_item['key_frame'] = modifier_full_dict[motion_id].get('key_frame', [])
+        
+        # 添加Gemini的回复
+        output_item['modifier'] = results.get(motion_id, "Error: No response")
+        
+        output_data.append(output_item)
+    
+    # 保存为JSON文件
+    output_filename = json_path.name  # 使用相同的文件名
+    output_path = output_folder / output_filename
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=4)
+    
+    print(f"\n✓ 已保存结果到: {output_filename}")
+    print(f"{'='*80}\n")
+
+
+def process_multiple_json_files(json_files, video_folder, output_folder, base_prompt, modifier_folder, max_workers_per_file, max_json_workers, max_retries=5, required_domains=None):
+    """
+    并行处理多个JSON文件
+    
+    Args:
+        json_files: JSON文件路径列表
+        video_folder: 原始视频文件夹
+        output_folder: 输出文件夹
+        base_prompt: 基础提示词
+        modifier_folder: modifier JSON文件夹
+        max_workers_per_file: 每个JSON文件内的片段处理并发数
+        max_json_workers: JSON文件级别的并发数
+        max_retries: API调用最大重试次数（默认5次）
+        required_domains: 必需的域列表（默认为 ['whole body', 'lower half body', 'upper half body', 'torso']）
+    """
+    print(f"\n开始并行处理 {len(json_files)} 个JSON文件 (JSON并发数: {max_json_workers})...")
+    
+    with ThreadPoolExecutor(max_workers=max_json_workers) as executor:
+        futures = {}
+        for json_path in json_files:
+            bsnm = os.path.basename(str(json_path))
+            output_path = os.path.join(output_folder, bsnm)
+            
+            if (os.path.exists(output_path)):
+                continue
+            
+            future = executor.submit(
+                process_json_file,
+                json_path,
+                video_folder,
+                output_folder,
+                base_prompt,
+                modifier_folder,
+                max_workers_per_file,
+                max_retries,
+                required_domains
+            )
+            futures[future] = json_path
+        
+        completed = 0
+        for future in as_completed(futures):
+            json_filename = futures[future]
+            completed += 1
+            try:
+                future.result()
+                print(f"\n[JSON文件 {completed}/{len(json_files)}] ✓ {json_filename} 完成")
+            except Exception as e:
+                print(f"\n[JSON文件 {completed}/{len(json_files)}] ✗ {json_filename} 失败: {e}")
+
+
+# ---- 新增功能: 读取多个错误路径列表文件并取并集 ----
+
+def read_error_list_files(list_files, json_folder: Path, modifier_folder: Path = None):
+    """
+    读取若干列出错误路径的文件（每行一个路径或 basename），取并集并解析为 JSON Path 列表。
+
+    处理策略:
+      - 忽略空行与注释行（以 '#' 开头）
+      - 如果行看起来像绝对路径且存在 -> 使用它
+      - 否则将行视为相对于 json_folder 的路径或 basename：
+          1) json_folder / line
+          2) json_folder / (line + '.json')
+          3) 如果 modifier_folder 提供，再尝试 modifier_folder / line 或 modifier_folder / (line + '.json')
+      - 找不到的条目会被警告并跳过（包含原始行内容、来自哪个列表文件）
+
+    Args:
+      list_files: 可迭代的路径，指向包含错误路径的文本文件
+      json_folder: 用于解析相对路径的根
+      modifier_folder: 可选，用于在 modifier 文件夹中查找 basename
+
+    Returns:
+      List[Path] -> 已存在且去重后的 JSON 文件路径
+    """
+    bad_paths = set()
+    # 先收集所有原始行（去重），但保留哪个列表文件来源用于更好的警告信息
+    line_sources = {}
+    for lf in list_files:
+        lf_path = Path(lf)
+        if not lf_path.exists():
+            print(f"警告: 错误路径列表文件不存在: {lf}")
+            continue
+        with open(lf_path, 'r', encoding='utf-8') as f:
+            for lineno, line in enumerate(f, start=1):
+                raw = line.rstrip('\n')
+                ln = raw.strip()
+                if not ln:
+                    continue
+                # 忽略注释行（以 # 开头）
+                if ln.startswith('#'):
+                    continue
+                # 去除行尾注释（例如: 'name.json  # comment' -> 'name.json')
+                if '#' in ln:
+                    ln = ln.split('#', 1)[0].strip()
+                    if not ln:
+                        continue
+                bad_paths.add(ln)
+                line_sources.setdefault(ln, []).append((lf, lineno, raw))
+
+    resolved = []
+    for bp in sorted(bad_paths):
+        p = Path(bp)
+        found = None
+        # 1) 绝对路径直接检查
+        if p.is_absolute():
+            if p.exists():
+                found = p
+            else:
+                # 如果绝对路径不存在，记录警告（显示来源信息）
+                srcs = line_sources.get(bp, [])
+                for lf, lineno, raw in srcs:
+                    print(f"警告: 列出的绝对路径不存在: {bp} (来自 {lf}:{lineno} 内容: '{raw}')")
+        else:
+            # 尝试 json_folder / bp
+            cand = json_folder / p
+            if cand.exists():
+                found = cand
+            else:
+                # 尝试加 .json
+                cand2 = json_folder / (p.name if p.suffix else p.name + '.json')
+                if cand2.exists():
+                    found = cand2
+                else:
+                    # 如果提供了 modifier_folder，也尝试在那里查找 basename
+                    if modifier_folder:
+                        m1 = Path(modifier_folder) / p
+                        m2 = Path(modifier_folder) / (p.name if p.suffix else p.name + '.json')
+                        if m1.exists():
+                            found = m1
+                        elif m2.exists():
+                            found = m2
+        if found:
+            resolved.append(found)
+        else:
+            srcs = line_sources.get(bp, [])
+            src_info = ", ".join([f"{lf}:{ln}" for lf, ln, _ in srcs]) if srcs else "(unknown source)"
+            print(f"警告: 未找到列出的路径 (尝试相对与文件名): {bp} 来源: {src_info}")
+
+    # 去重并排序（按路径字符串）
+    resolved = sorted(set(resolved), key=lambda x: str(x))
+    return resolved
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='从JSON和视频提取片段并调用Gemini 2.5 Pro分析',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例用法:
+  python process_and_analyze_segments.py --json_folder ./json_files --video_folder ./videos --output_folder ./results --prompt "描述这个视频中的动作"
+  python process_and_analyze_segments.py --json_folder ./json_files --video_folder ./videos --output_folder ./results --prompt_file ./prompt.txt --modifier_folder ./modifiers --max_workers 10 --max_json_workers 3
+
+同时，如果你有若干记录错误路径的文本文件（每行是一个需要重新生成的JSON路径），可以传入这些列表：
+  python process_and_analyze_segments.py --json_folder ./json_files --video_folder ./videos --output_folder ./results --prompt_file ./prompt.txt --error_list_files bad1.txt bad2.txt bad3.txt
+        """
+    )
+    
+    parser.add_argument('--json_folder', type=str, required=True,
+                        help='包含JSON文件的文件夹路径')
+    parser.add_argument('--video_folder', type=str, required=True,
+                        help='包含原始视频的文件夹路径')
+    parser.add_argument('--output_folder', type=str, required=True,
+                        help='输出文本文件的文件夹路径')
+    parser.add_argument('--modifier_folder', type=str, default=None,
+                        help='包含modifier JSON文件的文件夹路径（可选）')
+    parser.add_argument('--json_file', type=str, default=None,
+                        help='指定单个JSON文件（可选，不指定则处理文件夹内所有JSON）')
+    parser.add_argument('--prompt', type=str, default=None,
+                        help='直接输入的提示词')
+    parser.add_argument('--prompt_file', type=str, default=None,
+                        help='包含提示词的文件路径')
+    parser.add_argument('--max_workers', type=int, default=5,
+                        help='每个JSON文件的片段处理并发数 (默认: 5)')
+    parser.add_argument('--max_json_workers', type=int, default=3,
+                        help='JSON文件级别的并发数 (默认: 3，处理多个JSON文件时生效)')
+    parser.add_argument('--max_retries', type=int, default=5,
+                        help='API调用最大重试次数 (默认: 5)')
+    parser.add_argument('--required_domains', type=str, default=None,
+                        help='必需的域列表，用逗号分隔 (默认: "whole body,lower half body,upper half body,torso")')
+    parser.add_argument('--error_list_files', nargs='+', default=None,
+                        help='可选：若干包含错误路径的文本文件（每行一个需要重新生成的JSON路径），将会对并集中的路径重新生成')
+    
+    args = parser.parse_args()
+    
+    json_folder = Path(args.json_folder)
+    video_folder = Path(args.video_folder)
+    output_folder = Path(args.output_folder)
+    
+    # 检查文件夹是否存在
+    if not json_folder.exists():
+        raise FileNotFoundError(f"JSON文件夹不存在: {json_folder}")
+    if not video_folder.exists():
+        raise FileNotFoundError(f"视频文件夹不存在: {video_folder}")
+    
+    # 获取prompt
+    if args.prompt:
+        prompt = args.prompt
+    elif args.prompt_file:
+        prompt_file = Path(args.prompt_file)
+        if not prompt_file.exists():
+            raise FileNotFoundError(f"Prompt文件不存在: {prompt_file}")
+        with open(prompt_file, 'r', encoding='utf-8') as f:
+            prompt = f.read()
+    else:
+        raise ValueError("必须提供 --prompt 或 --prompt_file 参数之一")
+    
+    print("=" * 80)
+    print("Gemini 2.5 Pro 视频片段分析 (增强并行版)")
+    print("=" * 80)
+    print(f"\n配置:")
+    print(f"  - 片段处理并发数: {args.max_workers}")
+    print(f"  - JSON文件并发数: {args.max_json_workers}")
+    print(f"  - API最大重试次数: {args.max_retries}")
+    
+    # 处理 required_domains 参数
+    required_domains = None
+    if args.required_domains:
+        required_domains = [d.strip() for d in args.required_domains.split(',')]
+        print(f"  - 必需的域: {required_domains}")
+    else:
+        print(f"  - 必需的域: ['whole body', 'lower half body', 'upper half body', 'torso'] (默认)")
+    
+    print(f"\n使用的基础Prompt:\n{'-' * 80}\n{prompt}\n{'-' * 80}\n")
+    
+    if args.modifier_folder:
+        print(f"Modifier文件夹: {args.modifier_folder}\n")
+
+    # 如果传入了错误路径列表文件，则读取并取并集，只处理这些路径；否则按原逻辑处理全部或单个文件
+    if args.error_list_files:
+        print(f"读取错误路径列表文件: {args.error_list_files}，将取并集并重新生成这些路径对应的JSON")
+        json_files_to_process = read_error_list_files(args.error_list_files, json_folder, Path(args.modifier_folder) if args.modifier_folder else None)
+        if not json_files_to_process:
+            print("错误路径列表解析后为空，退出。请检查列表文件中的路径是否正确（绝对路径或相对于json_folder）。")
+            return
+        # 调用并行处理（不需要再次过滤已存在的输出，process_multiple_json_files 内已有判断）
+        process_multiple_json_files(
+            json_files_to_process,
+            video_folder,
+            output_folder,
+            prompt,
+            args.modifier_folder,
+            args.max_workers,
+            args.max_json_workers,
+            args.max_retries,
+            required_domains
+        )
+
+    else:
+        # 处理指定的JSON文件或文件夹中的所有JSON文件
+        if args.json_file:
+            json_path = json_folder / args.json_file
+            if not json_path.exists():
+                raise FileNotFoundError(f"JSON文件不存在: {json_path}")
+            process_json_file(json_path, video_folder, output_folder, prompt, args.modifier_folder, args.max_workers, args.max_retries, required_domains)
+        else:
+            json_files = sorted(json_folder.glob('*.json'))
+            if not json_files:
+                print(f"在 {json_folder} 中未找到JSON文件")
+                return
+            
+            print(f"找到 {len(json_files)} 个JSON文件\n")
+            
+            # 使用增强的并行处理
+            process_multiple_json_files(
+                json_files,
+                video_folder,
+                output_folder,
+                prompt,
+                args.modifier_folder,
+                args.max_workers,
+                args.max_json_workers,
+                args.max_retries,
+                required_domains
+            )
+    
+    print("\n" + "=" * 80)
+    print("所有处理完成!")
+    print("=" * 80)
+
+
+if __name__ == '__main__':
+    main()
