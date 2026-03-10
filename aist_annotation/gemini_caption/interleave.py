@@ -30,8 +30,8 @@ def interleave(file_name, caption_dir, modifier_dir, interleaved_dir):
 
 
 def process_dir():
-    caption_dir = 'caption/train'
-    modifier_dir = 'modifier/test'
+    caption_dir = '/network_space/server126/shared/sunyx/models/Choreo-llm/aist_annotation/posescript/src/text2pose/generative_caption/temp/test'
+    modifier_dir = '/network_space/server126/shared/sunyx/models/Choreo-llm/aist_annotation/posescript/src/text2pose/generative_modifier/temp/test'
     interleaved_dir = './interleaved/test'
     os.makedirs(interleaved_dir, exist_ok=True)
 

@@ -419,7 +419,7 @@ def check_response_domains(response_text, required_domains=None):
         (is_valid, missing_domains): is_valid为True表示所有域都存在，missing_domains为缺失的域列表
     """
     if required_domains is None:
-        required_domains = ['whole body', 'lower half body', 'upper half body', 'torso']
+        required_domains = ['whole body', 'lower half body', 'upper half body', 'torso', 'simple tag']
     
     missing_domains = []
     
@@ -690,6 +690,47 @@ def process_json_file(json_path, video_folder, output_folder, base_prompt, modif
     print(f"{'='*80}\n")
 
 
+def should_skip_slice(json_path, json_folder):
+    """
+    判断是否应该跳过某个 slice
+    规则：如果存在同名的更大的 "10 的倍数" slice，则跳过当前 slice
+    
+    例如：
+    - 如果存在 slice10，则跳过 slice1-9
+    - 如果存在 slice20，则跳过 slice11-19
+    
+    Args:
+        json_path: JSON 文件路径
+        json_folder: JSON 文件夹路径
+    
+    Returns:
+        bool: True 表示应该跳过，False 表示应该处理
+    """
+    import re
+    
+    filename = json_path.name
+    
+    # 提取 slice 编号
+    slice_num = extract_slice_number(filename)
+    
+    # 如果 slice 编号是 10 的倍数（包括 0），不跳过
+    if slice_num % 10 == 0:
+        return False
+    
+    # 计算下一个 10 的倍数
+    next_ten = ((slice_num // 10) + 1) * 10
+    
+    # 构造对应的文件名：替换 slice 编号
+    pattern = r'_slice\d+'
+    replacement = f'_slice{next_ten}'
+    target_filename = re.sub(pattern, replacement, filename)
+    
+    target_path = json_folder / target_filename
+    
+    # 如果存在下一个 10 的倍数的文件，则跳过当前文件
+    return target_path.exists()
+
+
 def process_multiple_json_files(json_files, video_folder, output_folder, base_prompt, modifier_folder, max_workers_per_file, max_json_workers, max_retries=5, required_domains=None):
     """
     并行处理多个JSON文件
@@ -709,11 +750,20 @@ def process_multiple_json_files(json_files, video_folder, output_folder, base_pr
     
     with ThreadPoolExecutor(max_workers=max_json_workers) as executor:
         futures = {}
+        skipped_count = 0
         for json_path in json_files:
             bsnm = os.path.basename(str(json_path))
             output_path = os.path.join(output_folder, bsnm)
             
+            # 检查输出文件是否已存在
             if (os.path.exists(output_path)):
+                continue
+            
+            # 检查是否应该跳过这个 slice（优化重复调用）
+            json_folder = Path(json_path).parent
+            if should_skip_slice(Path(json_path), json_folder):
+                skipped_count += 1
+                print(f"跳过 {bsnm}（存在更大的 10 倍数 slice）")
                 continue
             
             future = executor.submit(
@@ -730,14 +780,18 @@ def process_multiple_json_files(json_files, video_folder, output_folder, base_pr
             futures[future] = json_path
         
         completed = 0
+        total_to_process = len(futures)
         for future in as_completed(futures):
             json_filename = futures[future]
             completed += 1
             try:
                 future.result()
-                print(f"\n[JSON文件 {completed}/{len(json_files)}] ✓ {json_filename} 完成")
+                print(f"\n[JSON文件 {completed}/{total_to_process}] ✓ {json_filename} 完成")
             except Exception as e:
-                print(f"\n[JSON文件 {completed}/{len(json_files)}] ✗ {json_filename} 失败: {e}")
+                print(f"\n[JSON文件 {completed}/{total_to_process}] ✗ {json_filename} 失败: {e}")
+        
+        if skipped_count > 0:
+            print(f"\n总共跳过了 {skipped_count} 个重复的 slice 文件")
 
 
 # ---- 新增功能: 读取多个错误路径列表文件并取并集 ----

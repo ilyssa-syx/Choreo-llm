@@ -36,7 +36,7 @@ def parse_modifier_text(modifier_text, required_domains=None):
         缺失的 domain 列表（如果有）
     """
     if required_domains is None:
-        required_domains = ['whole body', 'lower half body', 'upper half body', 'torso']
+        required_domains = ['whole body', 'lower half body', 'upper half body', 'torso', 'simple tag']
     
     result = {}
     missing_domains = []

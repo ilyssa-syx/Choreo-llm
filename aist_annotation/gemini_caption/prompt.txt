@@ -21,11 +21,12 @@ You are an expert in analyzing dance videos. Your task is to describe the dancer
 
 3. **Length Constraints**
 
+* **simple tag**: within **7 words**, briefly summarize the main movement pattern
 * **whole body**: 25–35 words
 * **lower half body**: 15–25 words
 * **upper half body**: 12–20 words
 * **torso**: 12–20 words
-* **Total response**: keep the full answer within **100 words**
+* **Total response**: keep the full answer within **110 words**
 
 4. **Video Information**
 
@@ -35,6 +36,7 @@ You are an expert in analyzing dance videos. Your task is to describe the dancer
 
 ## Example
 
+* **simple tag:** side steps with arm swings
 * **whole body:** The dancer leans forward and hops on his right foot while repeatedly kicking his left leg backward, keeping his upper body in a stylish, fixed posture with controlled arm positions.
 * **lower half body:** Hops on the dancer's right foot while the dancer's left leg kicks backward with a bent knee.
 * **upper half body:** The dancer's right hand is held near the chin while the dancer's left arm extends backward.
@@ -43,6 +45,9 @@ You are an expert in analyzing dance videos. Your task is to describe the dancer
 ## Your Answer
 
 Please provide your analysis in the following format:
+
+**simple tag**
+[within 7 words]
 
 **whole body**
 [25–35 words]
