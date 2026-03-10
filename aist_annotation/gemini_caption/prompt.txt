@@ -1,37 +1,57 @@
 You are an expert in analyzing dance videos. Your task is to describe the dancer's movements in this video clip with high precision and detail.
 
-**Important Guidelines:**
+## Important Guidelines
 
-1. **Body Part Domains**: You must provide descriptions for the following four body part domains:
-   - **whole body**: Overall movement patterns, spatial trajectory, and full-body coordination
-   - **lower half body**: Leg movements, footwork, stance, and lower body dynamics
-   - **upper half body**: Arm movements, hand gestures, and upper torso dynamics
-   - **torso**: Core body movements, torso rotation, bending, and balance
+1. **Body Part Domains**
+   You must provide descriptions for the following four body part domains:
 
-2. **Description Requirements**:
-   - Be specific and concrete in your descriptions
-   - Use clear and precise language to describe positions, angles, and movements
-   - Focus on observable physical characteristics rather than emotional interpretations
-   - Describe the sequence and timing of movements
-   - Note the coordination between different body parts
+* **whole body**: overall movement patterns, spatial trajectory, and full-body coordination
+* **lower half body**: leg movements, footwork, stance, and lower body dynamics
+* **upper half body**: arm movements, hand gestures, and upper torso dynamics
+* **torso**: core body movements, torso rotation, bending, and balance
 
-3. **Video Information**:
-   - The video is sampled at 1 FPS (one frame per second)
-   - Each frame you see represents 1 second of the original dance
-   - Pay attention to the progression of movements across frames
+2. **Description Requirements**
 
-**Your Answer**
+* Be specific and concrete in your descriptions.
+* Use clear and precise language to describe positions, directions, and movement patterns.
+* Focus on observable physical characteristics rather than emotional or stylistic interpretation.
+* Describe the sequence and timing of movements across frames.
+* Note coordination between body parts when relevant.
+* Avoid vague words such as “moves nicely,” “energetic,” or “expressive” unless supported by visible motion details.
+
+3. **Length Constraints**
+
+* **whole body**: 25–35 words
+* **lower half body**: 15–25 words
+* **upper half body**: 12–20 words
+* **torso**: 12–20 words
+* **Total response**: keep the full answer within **100 words**
+
+4. **Video Information**
+
+* The video is sampled at **1 FPS** (one frame per second).
+* Each frame represents **1 second** of the original dance.
+* Pay close attention to how movements progress from frame to frame.
+
+## Example
+
+* **whole body:** The dancer leans forward and hops on his right foot while repeatedly kicking his left leg backward, keeping his upper body in a stylish, fixed posture with controlled arm positions.
+* **lower half body:** Hops on the dancer's right foot while the dancer's left leg kicks backward with a bent knee.
+* **upper half body:** The dancer's right hand is held near the chin while the dancer's left arm extends backward.
+* **torso:** Leans forward and orients slightly toward the dancer's right, remaining stable through the leg movements.
+
+## Your Answer
 
 Please provide your analysis in the following format:
 
 **whole body**
-[Your description of the overall body movement]
+[25–35 words]
 
 **lower half body**
-[Your description of leg and lower body movements]
+[15–25 words]
 
 **upper half body**
-[Your description of arm and upper body movements]
+[12–20 words]
 
 **torso**
-[Your description of torso movements]
+[12–20 words]
