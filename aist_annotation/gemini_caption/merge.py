@@ -203,7 +203,7 @@ def parse_args():
     ap.add_argument("--input_root", type=str, required=True, help="输入根目录（递归）")
     ap.add_argument("--output_root", type=str, required=True, help="输出根目录（保持结构）")
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--step_seconds", type=float, default=5.0, help="相邻 slice 偏移（秒），无 overlap 用 5.0")
+    ap.add_argument("--step_seconds", type=float, default=0.5, help="相邻 slice 偏移（秒），无 overlap 用 0.5")
     return ap.parse_args()
 
 
@@ -213,6 +213,5 @@ if __name__ == "__main__":
         input_root=Path(args.input_root),
         output_root=Path(args.output_root),
         fps=args.fps,
-        step_seconds=args.step_seconds,
-        wrap_output=args.wrap_output,
+        step_seconds=args.step_seconds
     )

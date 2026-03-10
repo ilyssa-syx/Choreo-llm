@@ -148,10 +148,6 @@ so that the choreography reflects both the global atmosphere of the piece and th
 
 ## Segment-Level Choreographic Summaries
 
-Below is the choreography I design in response to the musical structure described above.
-Each segment corresponds exactly to the musical segment with the same index.
-The movement content is intentionally shaped by the music's emotional tone, phrasing, and structural transitions.
-
 {segments_description}
 """
 

@@ -58,14 +58,21 @@ python interleave.py
 python call_gemini.py --json_folder /network_space/server126/shared/sunyx/models/Choreo-llm/aist_annotation/keyframe_detection/test --video_folder /network_space/server127_2/shared/caixhdata/aist_v/ --output_folder ./gemini_caption/test/ --modifier_folder ./interleaved/test/ --prompt_file ./prompt.txt 
 ```
 
-Merge:
+Parse and Merge:
 ```bash
-python merge.py
+python parser.py --input_folder ./gemini_caption/test/ --output_folder ./parsed/test/
+python merge.py --input_root ./parsed/test --output_root ./merged/test/
 ```
 
 ## Choreography
 
+### Build Choreography
+```bash
+conda activate madmom
+cd choreography/build
+
+```
 
 
-Dance Model:
+## Dance Model
 

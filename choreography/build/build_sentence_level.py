@@ -45,7 +45,7 @@ def return_periods(merged_path, wav_path, downbeats_per_segment=4):
     segment_cnt = 0
     song_cap = []
     sentence_cap = []
-    for caption in captions['merged_segments']:
+    for caption in captions:
         if caption['end_frame'] / 30.0 <= segment_times[segment_cnt + 1]:
             sentence_cap.append(caption)
         elif caption['start_frame'] / 30.0 >= segment_times[segment_cnt + 1]:
@@ -224,9 +224,9 @@ def deal_folder_parallel(merged_folder, wav_folder, out_folder, downbeats_per_se
                     tqdm.write(result) # 只打印错误信息
 
 if __name__ == "__main__":
-    merged_folder = 'merged/test'
+    merged_folder = '../../aist_annotation/gemini_caption/merged/test'
     wav_folder = '/network_space/storage43/sunyixuan/models/EDGE/data/test/wavs'
-    out_folder = 'split/test'
+    out_folder = './split/test'
     
     # 建议 max_workers 设置为 4 到 8 之间。
     # 如果设置过大，可能会触发 Gemini API 的 Rate Limit (429 Error)。

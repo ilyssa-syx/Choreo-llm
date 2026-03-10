@@ -41,24 +41,21 @@ def parse_modifier_text(modifier_text, required_domains=None):
     result = {}
     missing_domains = []
     
+    # 先移除所有星号，简化匹配
+    cleaned_text = modifier_text.replace('*', '')
+    
     # 解析每个 domain
     for domain in required_domains:
-        # 使用正则表达式匹配 **domain:**** 后面的内容
-        # 模式说明：
-        # \*\s* - 匹配星号和可选的空格（列表标记）
-        # \*\* - 匹配左侧加粗星号
-        # domain - 匹配域名
-        # :\*\* - 匹配冒号和右侧加粗星号
-        # \s* - 匹配可选的空格
-        # (.+?) - 非贪婪匹配描述内容
-        # (?=\n\*\s*\*\*|\Z) - 向前查找：下一个条目或字符串结尾
-        pattern = rf'\*\s*\*\*{re.escape(domain)}:\*\*\s*(.+?)(?=\n\*\s*\*\*|\Z)'
-        match = re.search(pattern, modifier_text, re.IGNORECASE | re.DOTALL)
+        # 构建所有域名的正则匹配模式（用于向前查找下一个域名）
+        all_domains_pattern = '|'.join([re.escape(d) for d in required_domains])
+        
+        # 匹配格式: domain名称 + 可选空白 + 换行 + 内容（直到下一个域名或结尾）
+        # 忽略大小写匹配
+        pattern = rf'{re.escape(domain)}\s*\n(.+?)(?=\n(?:{all_domains_pattern})|\Z)'
+        match = re.search(pattern, cleaned_text, re.IGNORECASE | re.DOTALL)
         
         if match:
             description = match.group(1).strip()
-            # 去掉所有星号（按照用户要求）
-            description = description.replace('*', '')
             # 清理描述文本：移除多余的空格和换行符
             description = re.sub(r'\s+', ' ', description).strip()
             
@@ -186,7 +183,7 @@ def main():
         required_domains = [d.strip() for d in args.required_domains.split(',')]
         print(f"使用自定义 domain 列表: {required_domains}")
     else:
-        required_domains = ['whole body', 'lower half body', 'upper half body', 'torso']
+        required_domains = ['simple tag', 'whole body', 'lower half body', 'upper half body', 'torso']
         print(f"使用默认 domain 列表: {required_domains}")
     
     print("=" * 80)
