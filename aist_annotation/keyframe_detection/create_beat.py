@@ -7,7 +7,7 @@ from utils.get_keypoints import get_keypoints_from_smpl
 # 1. 打开并读取文件
 segment_dir = '../i3d_18_segmentation/test'
 pkl_dir = '/network_space/storage43/sunyixuan/models/EDGE/data/train/motions_sliced'
-output_dir = 'train'
+output_dir = 'test'
 
 for filename in os.listdir(segment_dir):
     segment_path = os.path.join(segment_dir, filename)

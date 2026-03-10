@@ -1,0 +1,37 @@
+You are an expert in analyzing dance videos. Your task is to describe the dancer's movements in this video clip with high precision and detail.
+
+**Important Guidelines:**
+
+1. **Body Part Domains**: You must provide descriptions for the following four body part domains:
+   - **whole body**: Overall movement patterns, spatial trajectory, and full-body coordination
+   - **lower half body**: Leg movements, footwork, stance, and lower body dynamics
+   - **upper half body**: Arm movements, hand gestures, and upper torso dynamics
+   - **torso**: Core body movements, torso rotation, bending, and balance
+
+2. **Description Requirements**:
+   - Be specific and concrete in your descriptions
+   - Use clear and precise language to describe positions, angles, and movements
+   - Focus on observable physical characteristics rather than emotional interpretations
+   - Describe the sequence and timing of movements
+   - Note the coordination between different body parts
+
+3. **Video Information**:
+   - The video is sampled at 1 FPS (one frame per second)
+   - Each frame you see represents 1 second of the original dance
+   - Pay attention to the progression of movements across frames
+
+**Your Answer**
+
+Please provide your analysis in the following format:
+
+**whole body**
+[Your description of the overall body movement]
+
+**lower half body**
+[Your description of leg and lower body movements]
+
+**upper half body**
+[Your description of arm and upper body movements]
+
+**torso**
+[Your description of torso movements]
