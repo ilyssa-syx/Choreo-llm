@@ -111,8 +111,8 @@ def find_latest_checkpoint(checkpoint_dir: str):
         return None
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, global_step, checkpoint_dir):
-    """保存完整的checkpoint（模型+训练状态）"""
+def save_checkpoint(model, optimizer, scheduler, epoch, global_step, checkpoint_dir, processor=None):
+    """保存完整的checkpoint（模型+训练状态+processor）"""
     epoch_checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch + 1}")
 
     """
@@ -143,6 +143,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, checkpoint_
     model_to_save = model.module if hasattr(model, 'module') else model
     model_to_save.save_pretrained(epoch_checkpoint_path)
 
+    # 保存processor
+    if processor is not None:
+        processor.save_pretrained(epoch_checkpoint_path)
+
     # 保存训练状态
     trainer_state = {
         'epoch': epoch + 1,
@@ -157,6 +161,8 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, checkpoint_
     torch.save(trainer_state, os.path.join(epoch_checkpoint_path, "trainer_state.pt"))
 
     print(f"✓ Checkpoint saved: {epoch_checkpoint_path} (epoch={epoch+1}, step={global_step})")
+    if processor is not None:
+        print(f"✓ Processor saved")
     print()
 
 
@@ -763,12 +769,8 @@ def train(num_epochs, data_fraction=None, checkpoint_dir=None, final_model_dir=N
         print(f"Test Perplexity: {test_perplexity:.4f}")
         print(f"{'='*50}")
         
-        # 每个 epoch 结束后保存检查点
-        save_checkpoint(model, optimizer, scheduler, epoch, global_step, ckpt_dir)
-        # 保存processor（只需要保存一次，放在第一个epoch）
-        if epoch == start_epoch:
-            processor.save_pretrained(os.path.join(ckpt_dir, f"epoch_{epoch + 1}"))
-            print(f"✓ Processor saved")
+        # 每个 epoch 结束后保存检查点（包含 processor）
+        save_checkpoint(model, optimizer, scheduler, epoch, global_step, ckpt_dir, processor)
     
     # 保存最终模型
     print(f"\n{'='*50}")
