@@ -81,6 +81,7 @@ class DanceSongDataset(Dataset):
         It is divided into several segments:
         {segmentation}
         Please strictly follow the given segmentation and design the general choreography for each segment based on the overall characteristics of the piece and the structure of its segments.
+        For each segment, write at least one complete sentence describing the choreography.
         Output the thinking process in <think> </think> and final answer in <answer> </answer>"""
         return prompt_song
     

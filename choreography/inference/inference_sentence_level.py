@@ -16,8 +16,8 @@ AUDIO_CACHE_DIR = "../audio_segments_cache"  # 音频片段缓存目录
 CHECKPOINT_DIR = "./final_model"  # 微调好的模型checkpoint路径
 OUTPUT_DIR = "./finedance/choreo/test/"  # 输出文件夹（包含.txt和.json）
 
-# 设备选择：'cuda', 'cpu', 或 'auto'（自动选择）
-DEVICE = "auto"  # 可选值: 'cuda', 'cpu', 'auto'
+# 设备选择：仅支持 CUDA
+DEVICE = "cuda"
 
 # 生成配置
 MAX_NEW_TOKENS = 3072  # 最大生成token数
@@ -98,18 +98,18 @@ def build_prompt(summary: str) -> str:
     解析时先用 extract_answer_only() 提取 answer 块，再从中解析 movement 列表。
     """
     prompt = f"""Given a general choreographical instruction for this music segment, please develop it into a detailed motion sequence with precise timestamps and specific descriptions for different body parts.
-Consider the musical style, rhythmic feel, mood (as implied by the key), and the musical development indicated by the chord progression when arranging motion and transitions. 
+Consider the musical style, rhythmic feel, mood, and the musical development indicated by the chord progression when arranging motion and transitions. 
 
 Please output your answer in the following format:
 
 * **Movement 1 (0.36 - 1.48):**
 
+  **simple tag**: ... (must be <10 words, action-focused and describe the main body movements, explicitly mention torso direction and include key arm/leg actions when relevant, e.g., "body turning right while left leg kicks to the side and arms swing forward")
   **whole body**: ... (must be <25 words)
   **upper body**: ... (must be <15 words, describe left and right arms within this field)
   **lower body**: ... (must be <15 words, describe left and right legs within this field)
   **torso**: ... (must be <7 words)
-  **simple tag**: ... (must be <10 words, action-focused and describe the main body movements, explicitly mention torso direction and include key arm/leg actions when relevant, e.g., "body turning right while left leg kicks to the side and arms swing forward")
-
+  
 * **Movement 2 (1.67 - 2.90):**
   ......
   
@@ -210,13 +210,11 @@ def parse_movements(generated_text: str) -> List[Dict]:
         modifier_text = generated_text[start_pos:end_pos].strip()
 
         # 提取各个body part
+        simple_tag, found_simple_tag = extract_body_part(modifier_text, 'simple_tag')
         whole, found_whole = extract_body_part(modifier_text, 'whole')
         upper, found_upper = extract_body_part(modifier_text, 'upper')
         lower, found_lower = extract_body_part(modifier_text, 'lower')
         torso, found_torso = extract_body_part(modifier_text, 'torso')
-
-        # [改动 5] 提取 simple tag（校验用，不写入最终 JSON）
-        _simple_tag, found_simple_tag = extract_body_part(modifier_text, 'simple_tag')
 
         # 验证所有必需 body part 都存在（包括 simple tag）
         missing_parts = []
@@ -247,9 +245,10 @@ def parse_movements(generated_text: str) -> List[Dict]:
             'start_frame': start_frame,
             'end_frame': end_frame,
             'modifier': {
-                'whole': whole,
-                'upper': upper,
-                'lower': lower,
+                'simple_tag': simple_tag,
+                'whole_body': whole,
+                'upper_body': upper,
+                'lower_body': lower,
                 'torso': torso
             }
         })
@@ -282,13 +281,9 @@ def load_model_and_processor(checkpoint_dir: str, device: torch.device):
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         print("✓ Set pad_token to eos_token")
 
-    # 根据设备类型选择数据类型
-    if device.type == 'cpu':
-        print("✓ Using float32 for CPU")
-        torch_dtype = torch.float32
-    else:
-        print("✓ Using torch.bfloat16 for GPU")
-        torch_dtype = torch.bfloat16
+    # 使用 bfloat16 for GPU
+    torch_dtype = torch.bfloat16
+    print("✓ Using torch.bfloat16 for GPU")
 
     # 检测是否为 PEFT adapter-only checkpoint
     adapter_config_path = os.path.join(checkpoint_dir, "adapter_config.json")
@@ -311,14 +306,6 @@ def load_model_and_processor(checkpoint_dir: str, device: torch.device):
             trust_remote_code=True,
             torch_dtype=torch_dtype,
         )
-        if device.type == 'cpu':
-            base_model = base_model.float()
-            # 确保所有参数和buffer都是float32
-            for module in base_model.modules():
-                if hasattr(module, 'weight') and module.weight is not None:
-                    module.weight.data = module.weight.data.float()
-                if hasattr(module, 'bias') and module.bias is not None:
-                    module.bias.data = module.bias.data.float()
 
         # 挂载 PEFT adapter
         from peft import PeftModel
@@ -326,27 +313,12 @@ def load_model_and_processor(checkpoint_dir: str, device: torch.device):
         print("✓ PEFT adapter loaded successfully")
     else:
         # 非 adapter-only：直接加载
-        if device.type == 'cpu':
-            model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-                checkpoint_dir,
-                device_map={"": device},
-                trust_remote_code=True,
-                torch_dtype=torch.float32,
-            )
-            # 确保所有参数和buffer都是float32
-            model = model.float()
-            for module in model.modules():
-                if hasattr(module, 'weight') and module.weight is not None:
-                    module.weight.data = module.weight.data.float()
-                if hasattr(module, 'bias') and module.bias is not None:
-                    module.bias.data = module.bias.data.float()
-        else:
-            model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-                checkpoint_dir,
-                device_map={"": device},
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16,
-            )
+        model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
+            checkpoint_dir,
+            device_map={"": device},
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+        )
 
     # 设置为评估模式
     model.eval()
@@ -382,15 +354,9 @@ def generate_movements(model, processor, prompt: str, audio_path: str, device: t
         return_tensors="pt",
     )
     
-    # 移动到设备并确保数据类型匹配
-    if device.type == 'cuda':
-        # GPU模式：转换为bfloat16
-        inputs = {k: v.to(device=device, dtype=torch.bfloat16) if v.dtype == torch.float32 else v.to(device) 
-                  for k, v in inputs.items()}
-    else:
-        # CPU模式：转换为float32
-        inputs = {k: v.to(device=device, dtype=torch.float32) if v.dtype in [torch.float16, torch.bfloat16] else v.to(device) 
-                  for k, v in inputs.items()}
+    # 移动到设备并转换为bfloat16
+    inputs = {k: v.to(device=device, dtype=torch.bfloat16) if v.dtype == torch.float32 else v.to(device) 
+              for k, v in inputs.items()}
     
     # 生成
     with torch.no_grad():
@@ -428,11 +394,11 @@ def main():
     except Exception:
         pass
 
-    # 解析命令行参数
+    # 解析命令行参数（保留参数接口以兼容旧脚本，但仅支持cuda）
     parser = argparse.ArgumentParser(description='Sentence-Level Movement Generation')
     parser.add_argument('--device', type=str, default=DEVICE, 
-                        choices=['cuda', 'cpu', 'auto'],
-                        help='Device to use: cuda, cpu, or auto (default: auto)')
+                        choices=['cuda'],
+                        help='Device to use: cuda only (GPU required)')
     args = parser.parse_args()
     
     print(f"\n{'='*60}")
@@ -464,24 +430,11 @@ def main():
     os.makedirs(txt_output_dir, exist_ok=True)
     os.makedirs(json_output_dir, exist_ok=True)
     
-    # 设置设备
-    if args.device == 'auto':
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Auto-selected device: {device}")
-    elif args.device == 'cuda':
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            print(f"Using device: {device}")
-        else:
-            print("⚠ Warning: CUDA not available, falling back to CPU")
-            device = torch.device("cpu")
-    else:  # cpu
-        device = torch.device("cpu")
-        print(f"Using device: {device}")
-    
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    # 设置设备（仅支持CUDA）
+    device = torch.device("cuda")
+    print(f"Using device: {device}")
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
     print()
     
     # 加载模型

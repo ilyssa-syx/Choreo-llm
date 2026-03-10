@@ -32,7 +32,7 @@ ABLATION = "FULL"  # "FULL" 或 "NOCOT" (移除思考过程)
 STAGE = "TWOSTAGE"  # "TWOSTAGE" (Song + Segment) 或 "ONESTAGE" (Onestage only)
 
 # ============= LoRA 和量化配置 =============
-USE_LORA = True
+# 强制使用LoRA训练
 LOAD_IN_4BIT = True
 # 3090 建议使用 bf16 (Ampere架构支持)，比 fp16 更稳定
 COMPUTE_DTYPE = torch.bfloat16
@@ -56,9 +56,6 @@ SAVE_EVERY_N_STEPS = 100
 # 取值范围 (0, 1]，例如 0.2 表示只用 20% 数据训练
 # DATA_FRACTION 改为命令行参数
 DATA_FRACTION = None
-# 子采样策略: "uniform" 等间隔抽样; "random" 随机抽样
-DATA_SAMPLING_STRATEGY = "uniform"
-DATA_FRACTION_SEED = 42  # 随机抽样时的固定随机种子
 
 # 音频切片缓存配置（性能优化）
 SEGMENT_CACHE_DIR = "./audio_segments_cache"  # 预处理的音频切片保存路径
@@ -166,44 +163,14 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, checkpoint_
     print()
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
-    """加载checkpoint并恢复训练状态"""
+def load_training_state(checkpoint_path, optimizer, scheduler, processor=None):
+    """加载训练状态（optimizer、scheduler、processor、epoch信息），不包含模型权重"""
     if not os.path.exists(checkpoint_path):
         return 0, 0  # 返回起始epoch和global_step
     
     print(f"\n{'='*60}")
-    print(f"Loading checkpoint from: {checkpoint_path}")
+    print(f"Loading training state from: {checkpoint_path}")
     print(f"{'='*60}")
-    
-    # 加载模型权重
-    model_to_load = model.module if hasattr(model, 'module') else model
-    
-    # 如果是PEFT模型，需要特殊处理
-    if hasattr(model_to_load, 'load_adapter'):
-        # PEFT模型：加载adapter权重
-        from peft import PeftModel
-        try:
-            adapter_path = checkpoint_path
-            if os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
-                # 使用from_pretrained加载adapter权重到已有的PEFT模型
-                import safetensors
-                from safetensors.torch import load_file
-                
-                # 直接加载adapter权重文件
-                adapter_weights_path = os.path.join(adapter_path, "adapter_model.safetensors")
-                if os.path.exists(adapter_weights_path):
-                    adapter_weights = load_file(adapter_weights_path)
-                    # 加载权重到模型
-                    model_to_load.load_state_dict(adapter_weights, strict=False)
-                    print("✓ LoRA adapter weights loaded")
-                else:
-                    print("⚠ Warning: adapter_model.safetensors not found")
-            else:
-                print("⚠ Warning: No adapter_config.json found, skipping adapter loading")
-        except Exception as e:
-            print(f"⚠ Warning: Failed to load adapter: {e}")
-            import traceback
-            traceback.print_exc()
     
     # 尝试从目录名提取epoch信息（格式: epoch_7）
     start_epoch = 0
@@ -216,6 +183,22 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler):
             print(f"✓ Extracted epoch {start_epoch} from checkpoint directory name")
     except Exception as e:
         print(f"⚠ Warning: Could not extract epoch from directory name: {e}")
+    
+    # 加载processor（如果提供了processor参数且checkpoint中存在）
+    if processor is not None:
+        processor_config_path = os.path.join(checkpoint_path, "preprocessor_config.json")
+        tokenizer_config_path = os.path.join(checkpoint_path, "tokenizer_config.json")
+        if os.path.exists(processor_config_path) or os.path.exists(tokenizer_config_path):
+            try:
+                loaded_processor = AutoProcessor.from_pretrained(checkpoint_path)
+                # 更新processor的属性（保持对象引用，避免外部变量失效）
+                processor.tokenizer = loaded_processor.tokenizer
+                processor.feature_extractor = loaded_processor.feature_extractor
+                if hasattr(loaded_processor, 'audio_processor'):
+                    processor.audio_processor = loaded_processor.audio_processor
+                print(f"✓ Processor loaded from checkpoint")
+            except Exception as e:
+                print(f"⚠ Warning: Failed to load processor from checkpoint: {e}")
     
     # 加载训练状态（如果存在）
     trainer_state_path = os.path.join(checkpoint_path, "trainer_state.pt")
@@ -308,7 +291,7 @@ def evaluate_on_test_set(model, test_dataloader, processor, device):
 
 def train(num_epochs, data_fraction=None, checkpoint_dir=None, final_model_dir=None):
     """训练函数"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda")
     
     print(f"\n{'='*60}")
     print(f"Training Setup")
@@ -336,61 +319,47 @@ def train(num_epochs, data_fraction=None, checkpoint_dir=None, final_model_dir=N
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         print("✓ Set pad_token to eos_token")
     
-    # 3. 加载模型
-    try:
-        model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-            MODEL_ID,
-            quantization_config=bnb_config,
-            device_map="auto",
-            trust_remote_code=True,
-            # 如果支持 flash attention，使用它来加速和节省显存
-            attn_implementation="flash_attention_2" if torch.cuda.is_bf16_supported() else "eager"
-        )
-        print("✓ Model loaded successfully")
-    except Exception as e:
-        print(f"⚠ Failed to load with flash_attention_2, falling back to eager: {e}")
-        model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-            MODEL_ID,
-            quantization_config=bnb_config,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="eager"
-        )
+    # 3. 加载base模型（强制使用LoRA）
+    print("\nLoading base model...")
+    base_model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
+        MODEL_ID,
+        quantization_config=bnb_config,
+        device_map={"": 0},
+        trust_remote_code=True,
+        attn_implementation="eager",
+    )
+    print("✓ Base model loaded successfully")
     
     # 设置 pad_token_id
-    if model.config.pad_token_id is None:
-        model.config.pad_token_id = processor.tokenizer.pad_token_id
+    if base_model.config.pad_token_id is None:
+        base_model.config.pad_token_id = processor.tokenizer.pad_token_id
     
     # 关闭cache，启用输入梯度
-    model.config.use_cache = False
-    if hasattr(model, 'enable_input_require_grads'):
-        model.enable_input_require_grads()
+    base_model.config.use_cache = False
+    if hasattr(base_model, 'enable_input_require_grads'):
+        base_model.enable_input_require_grads()
     print("✓ Settings applied (use_cache=False, input_require_grads=True)")
     
     # 4. 启用梯度检查点 (极其重要！节省大量显存)
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    base_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     print("✓ Gradient checkpointing enabled (use_reentrant=False)")
     
-    # 5. LoRA 配置和应用
-    if USE_LORA:
-        print("\nPreparing LoRA...")
-        # 准备 k-bit 训练 (冻结原模型参数，norm 层转回 fp32)
-        model = prepare_model_for_kbit_training(model)
-        
-        peft_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
-            # AudioFlamingo 的语言模型部分通常是 Llama/Mistral 架构
-            # 如果报错找不到层，可以先 print(model) 查看具体层名
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-        )
-        
-        model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
-        print("✓ LoRA applied")
+    # 5. 准备k-bit训练并应用LoRA
+    print("\nPreparing LoRA...")
+    base_model = prepare_model_for_kbit_training(base_model)
+    
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    )
+    
+    model = get_peft_model(base_model, peft_config)
+    model.print_trainable_parameters()
+    print("✓ LoRA applied")
     
     model.train()
     
@@ -436,18 +405,11 @@ def train(num_epochs, data_fraction=None, checkpoint_dir=None, final_model_dir=N
     if fraction is not None and 0 < fraction < 1.0:
         total_size = len(dataset)
         subset_size = max(1, int(total_size * fraction))
-        if DATA_SAMPLING_STRATEGY == "uniform":
-            step = total_size / subset_size
-            indices = [int(i * step) for i in range(subset_size)]
-        else:
-            g = torch.Generator()
-            g.manual_seed(DATA_FRACTION_SEED)
-            indices = torch.randperm(total_size, generator=g)[:subset_size].tolist()
+        
+        step = total_size / subset_size
+        indices = [int(i * step) for i in range(subset_size)]
         dataset = Subset(dataset, indices)
-        print(
-            f"Using data fraction: {fraction} ({subset_size}/{total_size}), "
-            f"strategy={DATA_SAMPLING_STRATEGY}"
-        )
+        
     print(f"Total dataset size: {len(dataset)}")
     
     # DEBUG: 输出数据集样本信息
@@ -668,8 +630,21 @@ def train(num_epochs, data_fraction=None, checkpoint_dir=None, final_model_dir=N
     if RESUME_FROM_CHECKPOINT:
         latest_checkpoint = find_latest_checkpoint(ckpt_dir)
         if latest_checkpoint:
-            start_epoch, global_step = load_checkpoint(
-                latest_checkpoint, model, optimizer, scheduler
+            # 使用官方推荐方式加载adapter
+            print(f"\nLoading LoRA adapter from checkpoint: {latest_checkpoint}")
+            from peft import PeftModel
+            try:
+                model = PeftModel.from_pretrained(model, latest_checkpoint, is_trainable=True)
+                print("✓ LoRA adapter loaded successfully")
+            except Exception as e:
+                print(f"❌ Error: Failed to load LoRA adapter: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+            
+            # 加载训练状态（optimizer、scheduler、processor、epoch信息）
+            start_epoch, global_step = load_training_state(
+                latest_checkpoint, optimizer, scheduler, processor
             )
         else:
             print("\n✓ No checkpoint found, starting training from scratch\n")

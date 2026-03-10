@@ -1,7 +1,9 @@
 *.json
 *.pkl
 *.npz
+*.npy
 *.mp4
+*.mkv
 *.mp3
 __pycache__/
 *.pyc

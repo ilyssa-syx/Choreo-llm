@@ -1,0 +1,103 @@
+# 西方音乐风格舞蹈关键词（每行一个，# 开头为注释）
+# 目标舞种：classical / country / metal / reggae / jazz / rock / disco / blues
+# 使用方式：python -m bili_solo_pipeline.cli --queries_file keywords_western_dance.txt ...
+
+# === Classical / Ballet（西方古典舞 / 芭蕾）===
+ballet 独舞
+ballet
+芭蕾 solo
+芭蕾舞 独舞
+芭蕾舞
+古典芭蕾 独舞
+古典芭蕾
+芭蕾编舞 个人
+芭蕾舞 练习室
+ballet dance solo
+芭蕾 cover
+classical ballet solo
+芭蕾舞者 独舞
+足尖舞 独舞
+足尖舞
+足尖练习 芭蕾
+pointe
+pointe 芭蕾
+variation 芭蕾 独舞
+芭蕾变奏
+舞剧 芭蕾 片段
+剧院 芭蕾 独舞
+柴可夫斯基 芭蕾 舞蹈
+天鹅湖 芭蕾
+胡桃夹子 芭蕾
+睡美人 芭蕾
+吉赛尔 芭蕾
+
+# === Country（乡村舞 / 牛仔舞）===
+country dance 独舞
+country dance
+乡村舞 solo
+乡村舞
+牛仔舞 独舞
+牛仔舞
+country swing 舞蹈
+乡村风格舞蹈 个人
+排舞
+乡村排舞
+线舞
+line dance
+country line dance
+cowboy dance
+
+# === Metal（金属乐风格舞蹈）===
+metal dance 独舞
+metal dance
+metal风格编舞
+金属舞蹈
+金属乐舞蹈 solo
+heavy metal dance 舞蹈
+metal舞 个人
+
+# === Reggae（雷鬼舞）===
+reggae dance 独舞
+reggae dance
+雷鬼舞 solo
+雷鬼舞
+reggae舞蹈 个人
+雷鬼 舞蹈 cover
+reggae 编舞
+
+# === Jazz（爵士舞）===
+jazz 舞蹈 solo
+jazz dance
+爵士舞 独舞
+爵士舞
+jazz dance 个人
+jazz编舞 练习室
+街舞爵士 独舞
+
+# === Rock / Rock and Roll（摇滚舞）===
+rock dance 独舞
+rock dance
+摇滚舞 solo
+摇滚舞
+rock编舞 个人
+rock and roll舞 独舞
+摇滚风格舞蹈 cover
+摇滚舞蹈
+
+# === Disco（迪斯科）===
+disco dance 独舞
+disco dance
+迪斯科 solo
+迪斯科舞
+迪斯科舞蹈 个人
+disco编舞 舞蹈
+复古迪斯科 舞蹈
+
+# === Blues（布鲁斯 / 蓝调舞）===
+blues dance 独舞
+blues dance
+布鲁斯舞 solo
+布鲁斯舞
+蓝调舞蹈 个人
+blues舞 cover
+blues编舞 舞蹈

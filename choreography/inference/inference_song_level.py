@@ -17,8 +17,8 @@ AUDIO_FOLDER = "/network_space/server127/shared/sunyx/FineDance/data/finedance/m
 CHECKPOINT_DIR = "./final_model"  # 微调好的模型checkpoint路径
 OUTPUT_DIR = "./finedance/choreo_song/test"  # 输出文件夹（包含.txt和.json）
 
-# 设备选择：'cuda', 'cpu', 或 'auto'（自动选择）
-DEVICE = "auto"  # 可选值: 'cuda', 'cpu', 'auto'
+# 设备选择：仅支持 CUDA
+DEVICE = "cuda"
 
 # 生成配置
 MAX_NEW_TOKENS = 3072  # 最大生成token数（提高以减少截断）
@@ -71,7 +71,7 @@ def build_prompt(segmentation: str, genre: str) -> str:
     prompt = f"""The audio is the background music for a {genre}-style dance.
 It is divided into several segments:
 {segmentation}
-Please design the general choreography for each segment based on the overall characteristics of the piece and the structure of its segments.
+Please strictly follow the given segmentation and design the general choreography for each segment based on the overall characteristics of the piece and the structure of its segments.
 For each segment, write at least one complete sentence describing the choreography.
 Output the thinking process in <think> </think> and final answer in <answer> </answer>"""
     return prompt
@@ -237,13 +237,9 @@ def load_model_and_processor(checkpoint_dir: str, device: torch.device):
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         print("✓ Set pad_token to eos_token")
 
-    # 根据设备类型选择数据类型
-    if device.type == 'cpu':
-        torch_dtype = torch.float32
-        print("✓ Using torch.float32 for CPU")
-    else:
-        torch_dtype = torch.bfloat16
-        print("✓ Using torch.bfloat16 for GPU")
+    # 使用 bfloat16 for GPU
+    torch_dtype = torch.bfloat16
+    print("✓ Using torch.bfloat16 for GPU")
 
     # 检测是否为 PEFT adapter-only checkpoint
     adapter_config_path = os.path.join(checkpoint_dir, "adapter_config.json")
@@ -266,8 +262,6 @@ def load_model_and_processor(checkpoint_dir: str, device: torch.device):
             trust_remote_code=True,
             torch_dtype=torch_dtype,
         )
-        if device.type == 'cpu':
-            base_model = base_model.float()
 
         # 挂载 PEFT adapter
         from peft import PeftModel
@@ -281,8 +275,6 @@ def load_model_and_processor(checkpoint_dir: str, device: torch.device):
             trust_remote_code=True,
             torch_dtype=torch_dtype,
         )
-        if device.type == 'cpu':
-            model = model.float()
 
     # 设置为评估模式
     model.eval()
@@ -361,11 +353,11 @@ def is_generation_sufficient(parsed_segments: List[Dict], expected_segments: Lis
 
 def main():
     """主函数"""
-    # 解析命令行参数
+    # 解析命令行参数（保留参数接口以兼容旧脚本，但仅支持cuda）
     parser = argparse.ArgumentParser(description='Song-Level Choreography Generation')
     parser.add_argument('--device', type=str, default=DEVICE, 
-                        choices=['cuda', 'cpu', 'auto'],
-                        help='Device to use: cuda, cpu, or auto (default: auto)')
+                        choices=['cuda'],
+                        help='Device to use: cuda only (GPU required)')
     args = parser.parse_args()
     
     print(f"\n{'='*60}")
@@ -395,24 +387,11 @@ def main():
     os.makedirs(txt_output_dir, exist_ok=True)
     os.makedirs(json_output_dir, exist_ok=True)
     
-    # 设置设备
-    if args.device == 'auto':
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Auto-selected device: {device}")
-    elif args.device == 'cuda':
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            print(f"Using device: {device}")
-        else:
-            print("⚠ Warning: CUDA not available, falling back to CPU")
-            device = torch.device("cpu")
-    else:  # cpu
-        device = torch.device("cpu")
-        print(f"Using device: {device}")
-    
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    # 设置设备（仅支持CUDA）
+    device = torch.device("cuda")
+    print(f"Using device: {device}")
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
     print()
     
     # 加载模型
