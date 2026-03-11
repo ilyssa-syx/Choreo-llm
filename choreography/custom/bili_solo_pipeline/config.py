@@ -238,7 +238,7 @@ class PipelineConfig:
     unstable_vision_audio_rescue: bool = True
 
     # ---- 下载 ----
-    enable_download: bool = False          # 是否在 pipeline 末自动下载视频
+    enable_download: bool = True           # 是否在 pipeline 末自动下载视频
     download_dir: str = "data/videos"      # 视频下载根目录
     download_min_fusion_score: float = 0.0 # 仅下载 final_score 达到此值的视频（0=不限）
     download_keep: bool = True             # 下载 label=keep 的视频
@@ -246,6 +246,7 @@ class PipelineConfig:
     download_workers: int = 3              # 并发下载线程数
     download_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
     download_limit_rate: str = ""          # 限速（空=不限，如 '5M' 限 5MB/s）
+    download_fps: int = 30                 # 下载视频的目标帧率（0=不转换）
     download_cookies_file: str = ""        # yt-dlp 使用的 cookies 文件
 
     # ---- 断点续跑 ----

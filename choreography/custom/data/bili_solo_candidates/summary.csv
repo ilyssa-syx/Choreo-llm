@@ -1,0 +1,24 @@
+﻿search_query,total,metadata_passed,keep,review,drop
+popping,70,70,0,70,0
+urban,54,54,0,54,0
+urban舞蹈,48,48,0,48,0
+poppin,52,52,0,52,0
+hiphop,51,51,0,51,0
+机械舞,42,42,0,42,0
+震感舞,35,35,0,35,0
+urban编舞,56,56,0,56,0
+都市编舞,66,66,0,66,0
+hoping,2,2,0,2,0
+电流舞,57,57,0,57,0
+
+# Genre Coverage
+genre,total_matched,keep,review
+hoping,170,0,170
+hiphop,52,0,52
+urban,23,0,23
+jazz,6,0,6
+locking,3,0,3
+breaking,6,0,6
+korea,6,0,6
+disco,2,0,2
+classical,1,0,1

@@ -54,8 +54,8 @@ from .utils import ensure_dir, setup_logging
 
 logger = logging.getLogger(__name__)
 
-# 阶段常量
-STAGES = ["search", "filter", "dedup", "vision", "audio", "rank", "output", "download"]
+# 阶段常量（download 移到 vision 之前，在 dedup 后先下载视频）
+STAGES = ["search", "filter", "dedup", "download", "vision", "audio", "rank", "output", "cleanup"]
 
 
 class Pipeline:
@@ -146,14 +146,31 @@ class Pipeline:
 
         logger.info("After dedup: %d unique records", len(unique))
 
-        # ---- Stage 3: Vision ----
+        # ---- Stage 3: Download (before vision, so we have videos to analyze) ----
+        if self._cfg.enable_download and stage_idx <= STAGES.index("download"):
+            # 先下载所有候选视频（download_review=True 确保全部下载）
+            self._stage_download_candidates(unique)
+
+        # 无论是否启用下载，只要 video_dir 未显式指定，就尝试从 download_dir 推断
+        # 优先: enable_download 时直接使用 download_dir
+        # 兜底: download_dir/candidates/ 目录存在时也自动使用（支持 --run_from_stage vision 跳过下载阶段）
+        if self._video_dir is None:
+            download_dir = Path(self._cfg.download_dir)
+            if self._cfg.enable_download:
+                self._video_dir = download_dir
+                logger.info("Set video_dir to download_dir: %s", self._video_dir)
+            elif (download_dir / "candidates").exists():
+                self._video_dir = download_dir
+                logger.info("Auto-detected video_dir from %s/candidates/: %s", download_dir, self._video_dir)
+
+        # ---- Stage 4: Vision ----
         if stage_idx <= STAGES.index("vision"):
             unique = self._stage_vision(unique)
             self._save_cache_records("vision_scored", unique)
         else:
             unique = self._load_cache_records("vision_scored")
 
-        # ---- Stage 4: Audio ----
+        # ---- Stage 5: Audio ----
         if self._cfg.enable_audio_scoring:
             if stage_idx <= STAGES.index("audio"):
                 unique = self._stage_audio(unique)
@@ -161,19 +178,19 @@ class Pipeline:
             else:
                 unique = self._load_cache_records("audio_scored")
 
-        # ---- Stage 5: Rank ----
+        # ---- Stage 6: Rank ----
         if stage_idx <= STAGES.index("rank"):
             unique = self._fusion_ranker.rank_batch(unique)
             self._save_cache_records("ranked", unique)
         else:
             unique = self._load_cache_records("ranked")
 
-        # ---- Stage 6: Output ----
+        # ---- Stage 7: Output ----
         self._stage_output(unique)
 
-        # ---- Stage 7: Download ----
-        if self._cfg.enable_download:
-            self._stage_download(unique)
+        # ---- Stage 8: Cleanup (delete drop videos) ----
+        if self._cfg.enable_download and stage_idx <= STAGES.index("cleanup"):
+            self._cleanup_drop_videos(unique)
 
         logger.info("=== Pipeline DONE. Total candidates: %d ===", len(unique))
         return unique
@@ -341,18 +358,87 @@ class Pipeline:
 
         return records
 
-    def _stage_download(self, records: list[VideoRecord]) -> None:
-        """下载阶段：将 keep（和可选 review）视频下载为本地 .mp4。"""
-        logger.info("Stage: download")
+    def _stage_download_candidates(self, records: list[VideoRecord]) -> None:
+        """下载候选视频阶段：在 vision 检测前下载所有候选视频。"""
+        logger.info("Stage: download_candidates (%d videos)", len(records))
+        
+        downloader = VideoDownloader(
+            config=self._cfg,
+            cookies_file=self._cfg.download_cookies_file or None,
+        )
+        
         try:
-            downloader = VideoDownloader(
-                config=self._cfg,
-                cookies_file=self._cfg.download_cookies_file or None,
-            )
+            # force_all_candidates=True：跳过 label/score 过滤，
+            # 下载所有候选视频（因为还没做 vision/audio 检测）
+            downloader.download_batch(records, force_all_candidates=True)
         except RuntimeError as exc:
-            logger.error("%s", exc)
+            logger.error("Download failed: %s", exc)
+
+    def _cleanup_drop_videos(self, records: list[VideoRecord]) -> None:
+        """清理阶段：
+        1. 将 keep/review 的视频从 candidates/ 移动到对应目录
+        2. 删除 drop 的视频文件，节省存储空间
+        """
+        if self._video_dir is None:
+            logger.warning("No video_dir set, skip cleanup")
             return
-        downloader.download_batch(records)
+        
+        candidates_dir = self._video_dir / "candidates"
+        if not candidates_dir.exists():
+            logger.info("No candidates directory, skip cleanup")
+            return
+        
+        # 先移动 keep 和 review 的文件
+        keep_review_records = [r for r in records if r.final_recommendation in ("keep", "review")]
+        moved_count = 0
+        for rec in keep_review_records:
+            bvid = rec.bvid
+            for ext in ["mp4", "flv", "webm", "mkv", "avi"]:
+                src_path = candidates_dir / f"{bvid}.{ext}"
+                if src_path.exists():
+                    dest_dir = self._video_dir / rec.final_recommendation
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / src_path.name
+                    try:
+                        src_path.rename(dest_path)
+                        rec.downloaded_path = str(dest_path)
+                        moved_count += 1
+                        logger.debug("Moved: %s -> %s", src_path.name, rec.final_recommendation)
+                    except Exception as exc:
+                        logger.warning("Failed to move %s: %s", src_path, exc)
+        
+        logger.info("Moved %d videos to keep/review directories", moved_count)
+        
+        # 删除 drop 的文件（包括 candidates 目录中剩余的）
+        drop_records = [r for r in records if r.final_recommendation == "drop"]
+        deleted_count = 0
+        deleted_size = 0
+        
+        for rec in drop_records:
+            bvid = rec.bvid
+            # 尝试从 candidates 和 drop 目录删除
+            for dir_name in ["candidates", "drop"]:
+                check_dir = self._video_dir / dir_name
+                if not check_dir.exists():
+                    continue
+                for ext in ["mp4", "flv", "webm", "mkv", "avi"]:
+                    video_path = check_dir / f"{bvid}.{ext}"
+                    if video_path.exists():
+                        try:
+                            file_size = video_path.stat().st_size
+                            video_path.unlink()
+                            deleted_count += 1
+                            deleted_size += file_size
+                            logger.debug("Deleted: %s (%.2f MB)", video_path.name, file_size / 1024 / 1024)
+                        except Exception as exc:
+                            logger.warning("Failed to delete %s: %s", video_path, exc)
+        
+        logger.info(
+            "Cleanup done: moved %d files, deleted %d files, freed %.2f GB",
+            moved_count,
+            deleted_count,
+            deleted_size / 1024 / 1024 / 1024,
+        )
 
     def _stage_output(self, records: list[VideoRecord]) -> None:
         """输出阶段：写各类 JSONL 和 summary CSV。
@@ -487,13 +573,22 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _find_local_video(self, bvid: str) -> Optional[Path]:
-        """在 video_dir 中查找与 bvid 对应的视频文件。"""
+        """在 video_dir 中查找与 bvid 对应的视频文件。
+        
+        查找顺序：candidates/ -> keep/ -> review/ -> drop/
+        """
         if self._video_dir is None:
             return None
-        for ext in ["mp4", "flv", "webm", "mkv", "avi"]:
-            candidate = self._video_dir / f"{bvid}.{ext}"
-            if candidate.exists():
-                return candidate
+        
+        # 优先在 candidates 目录查找（候选阶段下载的位置）
+        for subdir in ["candidates", "keep", "review", "drop", ""]:
+            search_dir = self._video_dir / subdir if subdir else self._video_dir
+            if not search_dir.exists():
+                continue
+            for ext in ["mp4", "flv", "webm", "mkv", "avi"]:
+                candidate = search_dir / f"{bvid}.{ext}"
+                if candidate.exists():
+                    return candidate
         return None
 
     def _build_queries(self) -> list[str]:

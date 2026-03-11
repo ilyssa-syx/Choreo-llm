@@ -111,7 +111,7 @@ def format_modifier_text(modifiers, key_frames=None):
     return "\n".join(formatted_lines)
 
 
-def build_prompt_with_modifier(base_prompt, modifier_info, key_frames=None):
+def build_prompt_with_modifier(base_prompt, modifier_info, key_frames=None, use_modifier=True):
     """
     构建包含modifier信息的完整prompt
     
@@ -119,11 +119,12 @@ def build_prompt_with_modifier(base_prompt, modifier_info, key_frames=None):
         base_prompt: 基础prompt文本
         modifier_info: modifier信息列表
         key_frames: 关键帧列表（可选），用于标注每个Pose和Trans对应的采样帧
+        use_modifier: 是否使用modifier信息（默认True，如果为False则忽略所有modifier内容）
     
     Returns:
         完整的prompt
     """
-    if not modifier_info:
+    if not use_modifier or not modifier_info:
         return base_prompt
     
     # 格式化modifier文本（包含关键帧信息）
@@ -503,7 +504,7 @@ def call_gemini_api(video_bytes, prompt):
         return error_msg
 
 
-def process_single_segment(frames, segment, base_prompt, modifier_info, max_retries=5, required_domains=None):
+def process_single_segment(frames, segment, base_prompt, modifier_info, max_retries=5, required_domains=None, use_modifier=True):
     """
     处理单个视频片段：创建视频字节数据、构建prompt、调用API、返回结果
     如果回复缺少必需的域，会自动重试
@@ -515,6 +516,7 @@ def process_single_segment(frames, segment, base_prompt, modifier_info, max_retr
         modifier_info: 该segment的modifier信息
         max_retries: 最大重试次数（默认5次）
         required_domains: 必需的域列表（默认为 ['whole body', 'lower half body', 'upper half body', 'torso']）
+        use_modifier: 是否使用modifier信息（默认True）
     
     Returns:
         (motion_id, success, response_text, error_message)
@@ -526,7 +528,7 @@ def process_single_segment(frames, segment, base_prompt, modifier_info, max_retr
         key_frames = segment.get('key_frame', None)
         
         # 1. 构建包含modifier和关键帧信息的完整prompt
-        full_prompt = build_prompt_with_modifier(base_prompt, modifier_info, key_frames)
+        full_prompt = build_prompt_with_modifier(base_prompt, modifier_info, key_frames, use_modifier)
         print(f'Segment {motion_id}: 已创建完成full_prompt！')
         
         # 2. 创建视频片段字节数据（1 FPS）
@@ -562,7 +564,7 @@ def process_single_segment(frames, segment, base_prompt, modifier_info, max_retr
         return (motion_id, False, None, error_msg)
 
 
-def process_json_file(json_path, video_folder, output_folder, base_prompt, modifier_folder, max_workers=5, max_retries=5, required_domains=None):
+def process_json_file(json_path, video_folder, output_folder, base_prompt, modifier_folder, max_workers=5, max_retries=5, required_domains=None, use_modifier=True):
     """
     处理单个JSON文件
     
@@ -575,6 +577,7 @@ def process_json_file(json_path, video_folder, output_folder, base_prompt, modif
         max_workers: 最大并发数
         max_retries: API调用最大重试次数（默认5次）
         required_domains: 必需的域列表（默认为 ['whole body', 'lower half body', 'upper half body', 'torso']）
+        use_modifier: 是否使用modifier信息（默认True）
     """
     json_path = Path(json_path)
     video_folder = Path(video_folder)
@@ -643,7 +646,8 @@ def process_json_file(json_path, video_folder, output_folder, base_prompt, modif
                 base_prompt, 
                 modifier_dict.get(segment['motion'], []),
                 max_retries,
-                required_domains
+                required_domains,
+                use_modifier
             )
             futures[future] = segment['motion']
         
@@ -731,7 +735,7 @@ def should_skip_slice(json_path, json_folder):
     return target_path.exists()
 
 
-def process_multiple_json_files(json_files, video_folder, output_folder, base_prompt, modifier_folder, max_workers_per_file, max_json_workers, max_retries=5, required_domains=None):
+def process_multiple_json_files(json_files, video_folder, output_folder, base_prompt, modifier_folder, max_workers_per_file, max_json_workers, max_retries=5, required_domains=None, use_modifier=True):
     """
     并行处理多个JSON文件
     
@@ -745,6 +749,7 @@ def process_multiple_json_files(json_files, video_folder, output_folder, base_pr
         max_json_workers: JSON文件级别的并发数
         max_retries: API调用最大重试次数（默认5次）
         required_domains: 必需的域列表（默认为 ['whole body', 'lower half body', 'upper half body', 'torso']）
+        use_modifier: 是否使用modifier信息（默认True）
     """
     print(f"\n开始并行处理 {len(json_files)} 个JSON文件 (JSON并发数: {max_json_workers})...")
     
@@ -775,7 +780,8 @@ def process_multiple_json_files(json_files, video_folder, output_folder, base_pr
                 modifier_folder,
                 max_workers_per_file,
                 max_retries,
-                required_domains
+                required_domains,
+                use_modifier
             )
             futures[future] = json_path
         
@@ -922,6 +928,8 @@ def main():
                         help='API调用最大重试次数 (默认: 5)')
     parser.add_argument('--required_domains', type=str, default=None,
                         help='必需的域列表，用逗号分隔 (默认: "whole body,lower half body,upper half body,torso")')
+    parser.add_argument('--no_modifier', action='store_true',
+                        help='如果设置，则不使用modifier和keyframe信息（仅使用base prompt）')
     parser.add_argument('--error_list_files', nargs='+', default=None,
                         help='可选：若干包含错误路径的文本文件（每行一个需要重新生成的JSON路径），将会对并集中的路径重新生成')
     
@@ -956,6 +964,7 @@ def main():
     print(f"  - 片段处理并发数: {args.max_workers}")
     print(f"  - JSON文件并发数: {args.max_json_workers}")
     print(f"  - API最大重试次数: {args.max_retries}")
+    print(f"  - 使用Modifier信息: {'否' if args.no_modifier else '是'}")
     
     # 处理 required_domains 参数
     required_domains = None
@@ -987,7 +996,8 @@ def main():
             args.max_workers,
             args.max_json_workers,
             args.max_retries,
-            required_domains
+            required_domains,
+            not args.no_modifier
         )
 
     else:
@@ -996,7 +1006,7 @@ def main():
             json_path = json_folder / args.json_file
             if not json_path.exists():
                 raise FileNotFoundError(f"JSON文件不存在: {json_path}")
-            process_json_file(json_path, video_folder, output_folder, prompt, args.modifier_folder, args.max_workers, args.max_retries, required_domains)
+            process_json_file(json_path, video_folder, output_folder, prompt, args.modifier_folder, args.max_workers, args.max_retries, required_domains, not args.no_modifier)
         else:
             json_files = sorted(json_folder.glob('*.json'))
             if not json_files:
@@ -1015,7 +1025,8 @@ def main():
                 args.max_workers,
                 args.max_json_workers,
                 args.max_retries,
-                required_domains
+                required_domains,
+                not args.no_modifier
             )
     
     print("\n" + "=" * 80)

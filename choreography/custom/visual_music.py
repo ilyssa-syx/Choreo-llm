@@ -15,7 +15,6 @@ Dependencies:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -184,23 +183,15 @@ def uniform_segment_starts(duration: float, clip_sec: float, num_segments: int, 
     return [float(s) for s in starts]
 
 
-def cache_key(
+def cache_filename(
     path: Path,
-    target_sr: int,
-    clip_sec: float,
     num_segments: int,
-    skip_head_sec: float,
-    amodel: str,
-    fusion: bool,
-    model_id: int,
 ) -> str:
-    st = path.stat()
-    raw = (
-        f"{path.resolve()}|size={st.st_size}|mtime_ns={st.st_mtime_ns}"
-        f"|sr={target_sr}|clip={clip_sec}|K={num_segments}|skip={skip_head_sec}"
-        f"|amodel={amodel}|fusion={fusion}|model_id={model_id}|pool=mean"
-    )
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    """
+    Generate cache filename from original filename.
+    Format: {original_stem}_seg{num_segments}.npy
+    """
+    return f"{path.stem}_seg{num_segments}.npy"
 
 
 def extract_segment_embeddings(
@@ -258,7 +249,8 @@ def load_or_extract_embedding_seq(
     cache_path: Optional[Path] = None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_dir / f"{cache_key(path, target_sr, clip_sec, num_segments, skip_head_sec, amodel, fusion, model_id)}.npy"
+        cache_filename_str = cache_filename(path, num_segments)
+        cache_path = cache_dir / cache_filename_str
         if cache_path.exists():
             seq = np.load(cache_path)
             if seq.ndim == 2:
@@ -403,7 +395,8 @@ def main() -> None:
     if not top:
         print("No valid candidates found. Check cache/audio/ffmpeg.")
         return
-
+    for rank, (sim, path) in enumerate(top, start=1):
+        print(f"{rank:3d}. sim={sim:.4f}  {path}")
         # ===== Copy top-N to output folder =====
     query_stem = query_path.stem  # e.g., 132 from 132.mp3
     out_dir = Path(args.out_dir) if args.out_dir else (Path("./music_knn") / query_stem)

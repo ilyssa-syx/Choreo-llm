@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 try:
     from ultralytics import YOLO  # type: ignore
     _YOLO_AVAILABLE = True
-except ImportError:
+except Exception as _yolo_import_err:
     _YOLO_AVAILABLE = False
     logger.warning(
-        "ultralytics not installed. Person detection will be unavailable. "
-        "Install with: pip install ultralytics"
+        "ultralytics unavailable (%s: %s). Person detection will be skipped. "
+        "If this is a CUDA error, try setting CUDA_VISIBLE_DEVICES or use CPU.",
+        type(_yolo_import_err).__name__, _yolo_import_err,
     )
 
 

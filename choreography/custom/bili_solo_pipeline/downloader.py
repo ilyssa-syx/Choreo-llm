@@ -69,13 +69,19 @@ class VideoDownloader:
     def download_batch(
         self,
         records: list[VideoRecord],
+        force_all_candidates: bool = False,
     ) -> tuple[list[VideoRecord], list[VideoRecord]]:
         """批量下载，返回 (成功列表, 失败列表)。
 
         会根据 config 自动决定下载哪些 label / score 的视频。
         已有 downloaded_path 且文件存在的视频直接跳过。
+
+        Args:
+            records: 视频记录列表
+            force_all_candidates: 若为 True，则跳过 label/score 过滤，
+                                  下载所有候选视频（用于 vision/audio 检测前）
         """
-        to_download = self._select_records(records)
+        to_download = self._select_records(records, force_all_candidates=force_all_candidates)
         if not to_download:
             logger.info("没有符合下载条件的视频（label/score 过滤后为空）。")
             return [], []
@@ -90,9 +96,12 @@ class VideoDownloader:
         succeeded: list[VideoRecord] = []
         failed: list[VideoRecord] = []
 
+        # 候选阶段下载：强制使用 candidates 目录
+        force_candidates = force_all_candidates
+
         with ThreadPoolExecutor(max_workers=self._cfg.download_workers) as pool:
             futures = {
-                pool.submit(self._download_one, rec): rec
+                pool.submit(self._download_one, rec, force_candidates): rec
                 for rec in to_download
             }
             with tqdm(total=len(futures), desc="Downloading", unit="video") as pbar:
@@ -129,10 +138,29 @@ class VideoDownloader:
     # 内部实现
     # ------------------------------------------------------------------
 
-    def _select_records(self, records: list[VideoRecord]) -> list[VideoRecord]:
-        """根据配置决定哪些视频需要下载。"""
+    def _select_records(
+        self,
+        records: list[VideoRecord],
+        force_all_candidates: bool = False,
+    ) -> list[VideoRecord]:
+        """根据配置决定哪些视频需要下载。
+
+        Args:
+            records: 视频记录列表
+            force_all_candidates: 若为 True，跳过 label/score 过滤
+        """
         selected = []
         for rec in records:
+            # 候选阶段：无条件下载所有视频（除了已有本地文件的）
+            if force_all_candidates:
+                # 已有本地文件则跳过
+                if rec.downloaded_path and Path(rec.downloaded_path).exists():
+                    logger.debug("已存在，跳过: %s", rec.downloaded_path)
+                    continue
+                selected.append(rec)
+                continue
+
+            # 正常下载阶段：根据 label/score 过滤
             # label 过滤
             if rec.final_recommendation == "keep" and not self._cfg.download_keep:
                 continue
@@ -153,9 +181,20 @@ class VideoDownloader:
             selected.append(rec)
         return selected
 
-    def _download_one(self, rec: VideoRecord) -> bool:
-        """下载单个视频，成功后更新 rec.downloaded_path，返回是否成功。"""
-        label_dir = Path(self._cfg.download_dir) / rec.final_recommendation
+    def _download_one(self, rec: VideoRecord, force_candidates_dir: bool = False) -> bool:
+        """下载单个视频，成功后更新 rec.downloaded_path，返回是否成功。
+        
+        Args:
+            rec: 视频记录
+            force_candidates_dir: 若为 True，强制下载到 candidates/ 目录
+        """
+        # 候选阶段强制下载到 candidates/，评分后下载到对应 label 目录
+        if force_candidates_dir:
+            subdir = "candidates"
+        else:
+            subdir = rec.final_recommendation
+        
+        label_dir = Path(self._cfg.download_dir) / subdir
         label_dir.mkdir(parents=True, exist_ok=True)
         out_path = label_dir / f"{rec.bvid}.mp4"
 
@@ -221,6 +260,9 @@ class VideoDownloader:
             cmd += ["--cookies", self._cookies_file]
         if self._cfg.download_limit_rate:
             cmd += ["--limit-rate", self._cfg.download_limit_rate]
+        # 设置帧率（使用 ffmpeg 后处理）
+        if self._cfg.download_fps > 0:
+            cmd += ["--postprocessor-args", f"ffmpeg:-r {self._cfg.download_fps}"]
         cmd.append(url)
         return cmd
 

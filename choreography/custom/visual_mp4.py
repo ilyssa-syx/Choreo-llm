@@ -40,19 +40,13 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-try:
-    from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
-
+import tqdm
 
 @dataclass
 class Segment:
     start: int
     end: int  # exclusive
     modifier: str
-
 
 def load_segments(json_path: Path) -> Tuple[List[Segment], Optional[int]]:
     with json_path.open("r", encoding="utf-8") as f:
@@ -65,10 +59,6 @@ def load_segments(json_path: Path) -> Tuple[List[Segment], Optional[int]]:
         start = int(s["start_frame"])
         end = int(s["end_frame"])
         modifier = str(s.get("description", "")).strip()
-
-        # Use [start, end) to avoid overlap (your example has end==next_start)
-        if end <= start:
-            continue
         segs.append(Segment(start=start, end=end, modifier=modifier))
 
     segs.sort(key=lambda x: (x.start, x.end))
@@ -282,8 +272,7 @@ def process_one_video(
         return False
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 1e-3:
-        fps = 30.0
+    assert fps - 30.0 < 0.01, f"Expected 30fps video, got {fps} for {video_path}"
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
