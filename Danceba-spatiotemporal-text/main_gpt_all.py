@@ -39,9 +39,10 @@ def main():
     _ALIAS_MAP = {
         'full': 'full', 'time_only': 'time_only', 'part_only': 'part_only', 'none': 'none',
         'no_body_mask': 'time_only', 'no_temporal_mask': 'part_only', 'no_mask': 'none',
-    }
+    } # 原始名 -> 规范化名
     _raw_mode = getattr(config, 'text_mask_mode', 'full')
     _canonical_mode = _ALIAS_MAP.get(_raw_mode, 'full')
+    # 从顶层config读，输入子变量
     if hasattr(config, 'structure_generate'):
         if hasattr(config.structure_generate, 'base'):
             config.structure_generate.base.text_mask_mode = _canonical_mode
