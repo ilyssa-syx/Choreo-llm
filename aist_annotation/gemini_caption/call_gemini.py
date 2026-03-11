@@ -160,110 +160,108 @@ Therefore, when describing specific aspects—such as the position or movement o
 
 def downsample_and_extract_frames(video_path, slice_number, target_frames=150):
     """
-    更快版：从 60FPS 视频降采样到 30FPS（每两帧取一帧），并提取对应 slice 的帧
-    - 优先使用 cap.set(...) 跳到起始帧
-    - 使用 cap.grab() 跳过不需要解码的帧，只对要保存的帧调用 retrieve()
+    从视频中提取对应 slice 的帧，统一工作在 30FPS。
+    - 若输入视频不是 30FPS，先用 ffmpeg 转换为 30FPS 临时文件
+    - 优先使用 cap.set(...) seek 到起始帧
+    - 逐帧读取，不再跳帧
     Returns: list of np.ndarray (BGR)
     """
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise ValueError(f"无法打开视频文件: {video_path}")
-
-    # 检查视频帧率是否为60FPS
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    assert abs(fps - 60.0) < 0.1, f"视频帧率应为60FPS，实际为{fps}FPS: {video_path}"
-
-    # 计算起始帧（60fps 视频，取每两帧中的一帧，相当于以 30fps 取帧）
-    # 原表达式 0.5 * slice_number * 30 * 2 == slice_number * 30
-    start_frame_60fps = int(slice_number * 30)
-
-    # 获取总帧数（某些容器/编解码器返回 -1 或 0，需要兼容）
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-
-    # 若知道总帧数，提前做越界检查
-    if total_frames > 0 and start_frame_60fps >= total_frames:
-        # 起始帧在视频之外，直接返回空并给警告
-        print(f"警告: start_frame ({start_frame_60fps}) >= 视频总帧数 ({total_frames})")
-        cap.release()
-        return []
-
-    frames = []
-    extracted = 0
-
-    # 先尝试直接 seek 到起始帧（比从头读快很多）
-    seek_ok = False
+    video_path = Path(video_path)
+    temp_path = None
     try:
-        # 设置为 60fps 下的帧索引
-        seek_ok = cap.set(cv2.CAP_PROP_POS_FRAMES, float(start_frame_60fps))
-        # 有些后端即使返回 True 也不保证精确定位，但大多数情况有明显加速
-    except Exception:
+        # 检查帧率
+        cap_check = cv2.VideoCapture(str(video_path))
+        if not cap_check.isOpened():
+            raise ValueError(f"无法打开视频文件: {video_path}")
+        fps = cap_check.get(cv2.CAP_PROP_FPS)
+        cap_check.release()
+
+        # 若不是 30fps，用 ffmpeg 转换为 30fps 临时文件
+        if abs(fps - 30.0) >= 0.1:
+            print(f"  视频帧率为 {fps:.2f}fps，转换为 30fps...")
+            with NamedTemporaryFile(suffix='.mp4', delete=False) as f:
+                temp_path = f.name
+            cmd = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                '-i', str(video_path),
+                '-r', '30',
+                '-c:v', 'libx264', '-preset', 'veryfast',
+                '-pix_fmt', 'yuv420p',
+                '-y', temp_path
+            ]
+            result = subprocess.run(cmd, capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg 转换失败: {result.stderr.decode(errors='ignore')}")
+            working_path = temp_path
+        else:
+            working_path = str(video_path)
+
+        cap = cv2.VideoCapture(working_path)
+        if not cap.isOpened():
+            raise ValueError(f"无法打开视频文件: {working_path}")
+
+        # 提取帧前 assert 是 30fps
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        assert abs(actual_fps - 30.0) < 0.1, f"视频帧率应为30FPS，实际为{actual_fps}FPS: {working_path}"
+
+        # 30fps 下的起始帧（与原 60fps 视频中 slice_number * 30 帧的时间点等价）
+        start_frame = int(slice_number * 15)
+
+        # 获取总帧数（某些容器/编解码器返回 -1 或 0，需要兼容）
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        # 若知道总帧数，提前做越界检查
+        if total_frames > 0 and start_frame >= total_frames:
+            print(f"警告: start_frame ({start_frame}) >= 视频总帧数 ({total_frames})")
+            cap.release()
+            return []
+
+        frames = []
+        extracted = 0
+
+        # 先尝试直接 seek 到起始帧（比从头读快很多）
         seek_ok = False
+        try:
+            seek_ok = cap.set(cv2.CAP_PROP_POS_FRAMES, float(start_frame))
+        except Exception:
+            seek_ok = False
 
-    if seek_ok:
-        # 使用 grab/retrieve：每两个 grab() 取一次 retrieve()
-        # 注意：grab() 前进一帧但不解码，retrieve() 解码当前帧
-        while extracted < target_frames:
-            # 第一次 grab：跳过（或到第一个候选帧）
-            ok = cap.grab()
-            if not ok:
-                # 视频结束或出错
-                # print(f"警告: 在提取 {extracted} 帧后视频结束（grab失败）")
-                break
+        if seek_ok:
+            # 逐帧读取，不再跳帧
+            while extracted < target_frames:
+                ok = cap.grab()
+                if not ok:
+                    break
+                ok_ret, frame = cap.retrieve()
+                if not ok_ret or frame is None:
+                    break
+                frames.append(frame)
+                extracted += 1
 
-            # 第二次 grab：到下一帧（我们希望 decode 这一帧）
-            ok = cap.grab()
-            if not ok:
-                # 如果第二次 grab 失败，尝试 retrieve 前一帧（部分后端可能仍可 retrieve）
-                # 尝试 retrieve（技术上 retrieve 应在 grab 之后）
-                try:
-                    ok_ret, frame = cap.retrieve()
-                    if ok_ret:
-                        frames.append(frame)
-                        extracted += 1
-                except Exception:
-                    pass
-                break
+        else:
+            # 回退：从头快速跳过到 start_frame，然后逐帧读取
+            frame_count = 0
+            while frame_count < start_frame:
+                if not cap.grab():
+                    break
+                frame_count += 1
+            while extracted < target_frames:
+                ok_ret, frame = cap.read()
+                if not ok_ret or frame is None:
+                    print(f"警告: 视频在提取 {extracted} 帧后结束")
+                    break
+                frames.append(frame)
+                extracted += 1
 
-            # decode current frame
-            ok_ret, frame = cap.retrieve()
-            if not ok_ret or frame is None:
-                # retrieve 失败，结束循环
-                break
+        cap.release()
+        return frames
 
-            frames.append(frame)
-            extracted += 1
-
-    else:
-        # 回退：如果 seek 不可靠，就从头读并按原逻辑按 index 过滤（较慢）
-        # 但我们仍然尽量跳到 start_frame 处通过读取并丢弃前面的帧
-        frame_count = 0
-        extracted_count = 0
-
-        # 先快速跳过到 start_frame（通过 grab 更快）
-        while frame_count < start_frame_60fps:
-            if not cap.grab():
-                break
-            frame_count += 1
-
-        # 然后使用 grab/retrieve 每两帧抓取一个
-        while extracted_count < target_frames:
-            # 跳过一帧
-            if not cap.grab():
-                print(f"警告: 视频在提取{extracted_count}帧前结束")
-                break
-            # 抓取并 decode 下一帧
-            if not cap.grab():
-                print(f"警告: 视频在提取{extracted_count}帧前结束 (第二次 grab 失败)")
-                break
-            ok_ret, frame = cap.retrieve()
-            if not ok_ret or frame is None:
-                print(f"警告: retrieve 失败，在已抓取 {extracted_count} 帧时")
-                break
-            frames.append(frame)
-            extracted_count += 1
-
-    cap.release()
-    return frames
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 
@@ -617,7 +615,7 @@ def process_json_file(json_path, video_folder, output_folder, base_prompt, modif
         raise FileNotFoundError(f"视频文件不存在: {video_path}")
     
     # 提取并降采样帧
-    print(f"从帧 {int(0.5 * slice_number * 30 * 2)} 开始提取150帧...")
+    print(f"从帧 {int(slice_number * 15)} 开始提取150帧（30fps）...")
     frames = downsample_and_extract_frames(video_path, slice_number, target_frames=150)
     # print(f"成功提取 {len(frames)} 帧")
     assert len(frames) == 150, f"预期提取150帧，但实际提取了{len(frames)}帧"

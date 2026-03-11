@@ -12,13 +12,10 @@ Folder traversal:
 - out_dir: write output mp4 keeping the same relative structure
 
 Annotation JSON format (relevant fields):
-{
-  "merged_segments": [
+[
     {"start_frame": 47, "end_frame": 88, "modifier": "..."},
     ...
-  ],
-  "trim_frame": 345
-}
+]
 
 Notes:
 - Assumes your video has been converted to 30fps already (as you said).
@@ -48,7 +45,7 @@ class Segment:
     end: int  # exclusive
     modifier: str
 
-def load_segments(json_path: Path) -> Tuple[List[Segment], Optional[int]]:
+def load_segments(json_path: Path) -> List[Segment]:
     with json_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -58,7 +55,7 @@ def load_segments(json_path: Path) -> Tuple[List[Segment], Optional[int]]:
             continue
         start = int(s["start_frame"])
         end = int(s["end_frame"])
-        modifier = str(s.get("description", "")).strip()
+        modifier = str(s.get("modifier", "")).strip()
         segs.append(Segment(start=start, end=end, modifier=modifier))
 
     segs.sort(key=lambda x: (x.start, x.end))
@@ -272,7 +269,7 @@ def process_one_video(
         return False
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    assert fps - 30.0 < 0.01, f"Expected 30fps video, got {fps} for {video_path}"
+    assert abs(fps - 30.0) < 0.01, f"Expected 30fps video, got {fps} for {video_path}"
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -417,7 +414,7 @@ def main() -> None:
         print(f"[INFO] No videos found under: {video_dir} (ext={exts})")
         return
 
-    iterator = tqdm(videos, desc="Processing") if (HAS_TQDM and len(videos) > 1) else videos
+    iterator = tqdm.tqdm(videos, desc="Processing") if len(videos) > 1 else videos
 
     ok_cnt = 0
     skip_cnt = 0
