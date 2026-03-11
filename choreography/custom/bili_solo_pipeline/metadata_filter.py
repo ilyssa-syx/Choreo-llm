@@ -81,30 +81,24 @@ class MetadataFilter:
         reasons: list[str] = []
         score_parts: list[float] = []
 
-        # ---- 1. 时长精确判断 ----
-        # 注意：搜索接口返回的时长桶是粗粒度的（如 10mins+），
-        # 必须用解析后的精确秒数判断
-        if rec.duration_sec < self._cfg.min_duration_sec:
+        # ---- 1. 时长精确判断：严格限制在 30s - 5min ----
+        if rec.duration_sec < 30:
             reasons.append(
-                f"REJECT:duration_too_short({rec.duration_sec:.0f}s < {self._cfg.min_duration_sec:.0f}s)"
+                f"REJECT:duration_too_short({rec.duration_sec:.0f}s < 30s)"
             )
             rec.metadata_filter_pass = False
             rec.metadata_filter_reasons = reasons
             rec.metadata_score = 0.0
             return rec
 
-        if rec.duration_sec > self._cfg.max_duration_sec:
+        if rec.duration_sec > 300:  # 5 minutes
             reasons.append(
-                f"REJECT:duration_too_long({rec.duration_sec:.0f}s > {self._cfg.max_duration_sec:.0f}s)"
+                f"REJECT:duration_too_long({rec.duration_sec:.0f}s > 300s)"
             )
             rec.metadata_filter_pass = False
             rec.metadata_filter_reasons = reasons
             rec.metadata_score = 0.0
             return rec
-
-        # 时长加分（30s~5min 为最优区间）
-        dur_score = self._duration_score(rec.duration_sec)
-        score_parts.append(("duration", dur_score, 0.2))
 
         # ---- 2. 播放量下限 ----
         if rec.view_count < self._cfg.min_view_count:
@@ -125,23 +119,15 @@ class MetadataFilter:
             rec.metadata_score = 0.0
             return rec
 
-        # ---- 4. 软降权词（不硬拒绝，但拉低 score） ----
-        soft_hits = contains_any(combined_text, self._soft_penalty)
-        if soft_hits:
-            reasons.append(f"SOFT_PENALTY:{', '.join(soft_hits[:3])}")
-            score_parts.append(("soft_penalty", 0.0, 0.20))   # 20% 权重贡献 0 分
-        else:
-            score_parts.append(("soft_penalty", 1.0, 0.20))
-
-        # ---- 5. 标题白名单命中 ----
+        # ---- 4. 标题白名单命中 ----
         whitelist_hits = contains_any(combined_text, self._whitelist)
         if whitelist_hits:
             reasons.append(f"PASS:whitelist_hit({', '.join(whitelist_hits[:5])})")
             white_score = min(1.0, len(whitelist_hits) / 3.0)
-            score_parts.append(("whitelist", white_score, 0.35))
+            score_parts.append(("whitelist", white_score, 0.40))
         else:
             reasons.append("WARN:no_whitelist_keyword_hit")
-            score_parts.append(("whitelist", 0.1, 0.35))
+            score_parts.append(("whitelist", 0.1, 0.40))
 
         # ---- 5. 舞种关键词匹配 ----
         matched_genres, matched_kws = self._match_genres(combined_text)
@@ -150,20 +136,29 @@ class MetadataFilter:
         if matched_genres:
             reasons.append(f"PASS:genre_hit({', '.join(matched_genres[:5])})")
             genre_score = min(1.0, len(matched_genres) * 0.5)
-            score_parts.append(("genre", genre_score, 0.25))
+            score_parts.append(("genre", genre_score, 0.35))
         else:
             reasons.append("INFO:no_genre_matched")
-            score_parts.append(("genre", 0.0, 0.25))
+            score_parts.append(("genre", 0.0, 0.35))
 
         # ---- 6. 音频相关关键词 ----
         audio_boost = contains_any(combined_text, AUDIO_BOOST_KEYWORDS)
         audio_penalty = contains_any(combined_text, AUDIO_PENALTY_KEYWORDS)
+        
+        # 如果命中 audio_penalty，直接拒绝
+        if audio_penalty:
+            reasons.append(f"REJECT:audio_penalty_hit({', '.join(audio_penalty[:3])})")
+            rec.metadata_filter_pass = False
+            rec.metadata_filter_reasons = reasons
+            rec.metadata_score = 0.0
+            return rec
+        
         if audio_boost:
             reasons.append(f"AUDIO_BOOST:{', '.join(audio_boost[:3])}")
-        if audio_penalty:
-            reasons.append(f"AUDIO_PENALTY:{', '.join(audio_penalty[:3])}")
-        audio_meta_score = max(0.0, 0.5 + 0.25 * len(audio_boost) - 0.35 * len(audio_penalty))
-        score_parts.append(("audio_meta", min(1.0, audio_meta_score), 0.20))
+            audio_meta_score = min(1.0, 0.7 + 0.3 * len(audio_boost))
+            score_parts.append(("audio_meta", audio_meta_score, 0.25))
+        else:
+            score_parts.append(("audio_meta", 0.5, 0.25))
 
         # ---- 计算综合 metadata_score ----
         if isinstance(score_parts[0], tuple):
@@ -251,18 +246,4 @@ class MetadataFilter:
                 matched_keywords.extend(hits)
         return matched_genres, list(set(matched_keywords))
 
-    @staticmethod
-    def _duration_score(duration_sec: float) -> float:
-        """时长评分：30s~5min 为最优，过短或过长都降分。"""
-        if duration_sec < 30:
-            return 0.0
-        elif duration_sec <= 300:   # <= 5 min
-            # 线性从 0.5 升到 1.0
-            return 0.5 + 0.5 * ((duration_sec - 30) / 270)
-        elif duration_sec <= 600:   # 5~10 min
-            return 1.0
-        elif duration_sec <= 1800:  # 10~30 min
-            # 线性从 1.0 降到 0.6
-            return 1.0 - 0.4 * ((duration_sec - 600) / 1200)
-        else:
-            return 0.4
+

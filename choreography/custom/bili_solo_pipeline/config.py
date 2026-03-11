@@ -153,8 +153,9 @@ TITLE_WHITELIST: list[str] = [
 # 硬性黑名单：命中即直接拒绝（明确不含独舞内容）
 TITLE_BLACKLIST: list[str] = [
     "多人", "齐舞", "团舞", "reaction", "解说", "盘点",
-    "采访", "花絮", "预告", "混剪", "剪辑", "鬼畜",
-    "MAD", "口播", "vlog", "综艺", "节目片段",
+    "采访", "花絮", "预告", "鬼畜",
+    "MAD", "口播", "vlog", "综艺",
+    "教程", "教学", "拆解", "分析"
 ]
 
 # 软性降权词：出现后降低 metadata_score，但不硬性拒绝
@@ -209,20 +210,21 @@ class PipelineConfig:
     # ---- Sol 评分 ----
     solo_threshold: float = 0.75          # >=此值 -> keep（视觉层面）
     uncertain_threshold: float = 0.45    # >=此值 -> review；<此值 -> drop
-    min_valid_person_ratio: float = 0.3  # 有效人体帧最低占比（否则为 no_person）
-    min_single_person_ratio: float = 0.5 # 单人帧最低占比（solo 判断核心）
-    max_crowded_ratio: float = 0.3        # 多人帧最大允许占比
-    min_dominant_area_ratio: float = 0.04 # 主体人物面积最小占比（画面 4%）
+    min_valid_person_ratio: float = 0.9  # 有效人体帧最低占比（否则为 no_person）
+    min_single_person_ratio: float = 0.9 # 单人帧最低占比（solo 判断核心）
+    max_crowded_ratio: float = 0.1        # 多人帧最大允许占比
+    min_dominant_area_ratio: float = 0.1 # 主体人物面积最小占比（画面 4%）
 
     # ---- 音频评分 ----
     enable_audio_scoring: bool = True
     audio_threshold: float = 0.60         # >=此值 -> audio 通过
     speech_ratio_max: float = 0.35        # 语音占比超过此值 -> speech_heavy
-    min_audio_present_ratio: float = 0.3  # 非静音最低占比（避免空音轨）
-    min_loudness_mean: float = -45.0      # 最低平均响度 LUFS（过低 -> low_volume）
-    max_clipping_ratio: float = 0.02      # 最大削波比例（超过 -> noisy）
+    min_audio_present_ratio: float = 0.75  # 非静音最低占比（避免空音轨）
+    min_loudness_mean: float = -32.0      # 最低平均响度 LUFS（过低 -> low_volume）
+    max_clipping_ratio: float = 0.01      # 最大削波比例（超过 -> noisy）
     use_heuristic_audio: bool = True      # 无模型时使用启发式音频评估
     audio_segment_duration_sec: float = 30.0  # 取样音频段长度（秒，从中间取）
+    min_snr_proxy: float = 10.0
 
     # ---- 去重 ----
     enable_phash_dedup: bool = False      # 封面图感知哈希去重（需额外依赖）

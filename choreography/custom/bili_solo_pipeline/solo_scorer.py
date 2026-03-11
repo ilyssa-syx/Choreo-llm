@@ -129,42 +129,31 @@ class SoloScorer:
             return result
 
         # ---- 计算 solo_score ----
+        # 只用主体面积和运动分按 1:1 加权
         score_components: list[tuple[str, float, float]] = []
-
-        # 单人帧比例（权重最高）
-        score_components.append(("single_ratio", single_ratio, 0.45))
-        if single_ratio < self._cfg.min_single_person_ratio:
-            reasons.append(
-                f"WARN:low_single_person_ratio({single_ratio:.2f} < {self._cfg.min_single_person_ratio:.2f})"
-            )
-        else:
-            reasons.append(f"PASS:single_person_ratio={single_ratio:.2f}")
-
-        # 有效人体帧比例
-        score_components.append(("valid_ratio", valid_ratio, 0.20))
 
         # 主体面积大小（越大说明人物越清晰）
         # min_dominant_area=0.04 对应占画面约 4%（全身帧约 15~40%）
         area_score = min(1.0, avg_max_area / 0.20)  # 0.20 = 20% 面积为满分参考
-        score_components.append(("dominant_area", area_score, 0.20))
+        score_components.append(("dominant_area", area_score, 0.5))
         if avg_max_area < self._cfg.min_dominant_area_ratio:
             reasons.append(
                 f"WARN:low_dominant_area({avg_max_area:.3f} < {self._cfg.min_dominant_area_ratio:.3f})"
             )
+        else:
+            reasons.append(f"PASS:dominant_area={avg_max_area:.3f}")
 
-        # 非多人帧惩罚（多人帧越少越好）
-        non_crowd_score = 1.0 - crowded_ratio
-        score_components.append(("non_crowded", non_crowd_score, 0.15))
-
-        # 运动分（可选，权重较低）
+        # 运动分（必须计算，权重 0.5）
         if motion_score is not None:
-            score_components.append(("motion", motion_score, 0.10))
-            # 补偿其他项满分权重到 0.90，此处直接使用 0.10 额外加成
+            score_components.append(("motion", motion_score, 0.5))
             if motion_score < 0.2:
                 reasons.append(f"WARN:low_motion_score({motion_score:.3f})—may_be_static_cover")
+            else:
+                reasons.append(f"PASS:motion_score={motion_score:.3f}")
         else:
-            # 无运动分时重新归一化权重（不改变相对比例，直接 normalize）
-            pass
+            # 无法计算运动分时，100% 依赖面积分
+            score_components = [("dominant_area", area_score, 1.0)]
+            reasons.append("WARN:motion_score_unavailable—using_area_only")
 
         # 归一化加权
         total_w = sum(w for _, _, w in score_components)

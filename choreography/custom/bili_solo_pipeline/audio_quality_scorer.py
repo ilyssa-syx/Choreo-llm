@@ -9,23 +9,32 @@ audio_quality_scorer.py
   - "音乐清晰"是训练友好的代理目标，不等价于版权可用性
   - 仍需后续人工与合规确认
 
-两种模式（自动切换）：
-  A. 启发式模式（use_heuristic=True, 默认）
-     仅依赖 ffmpeg + librosa/pydub，不需额外模型
-     - 响度分析（音量、稳定性）
-     - 静音检测（audio_present_ratio）
-     - 削波检测（clipping_ratio）
-     - 简易语音/音乐分离启发式（基于频谱特征）
-     - 可选节拍强度（librosa.beat）
+评分模式（硬性筛选）：
+  逐项检查以下指标，任一不达标立即拒绝：
+  1. audio_present_ratio >= min_audio_present_ratio
+  2. loudness_mean >= min_loudness_mean
+  3. clipping_ratio <= max_clipping_ratio
+  4. snr_proxy >= min_snr_proxy (可选)
+  5. speech_ratio <= speech_ratio_max
+  6. music_confidence >= min_music_conf (可选)
+  
+  所有检查通过 -> audio_score=1.0, label="clear_music"
+  
+  不再使用综合评分，而是"全通过"或"拒绝"的二元模式。
 
-  B. 模型模式（use_heuristic=False）
-     使用音频分类模型（如 panns_inference / speechbrain）区分 speech vs music
-     若模型不可用自动降级到 A 模式
+启发式指标（不需额外模型）：
+  - 响度分析（音量、稳定性）
+  - 静音检测（audio_present_ratio）
+  - 削波检测（clipping_ratio）
+  - 简易信噪比（snr_proxy）
+  - 简易语音/音乐分离启发式（基于频谱特征）
+  - 可选节拍强度（librosa.beat）
 
 执行顺序（pipeline 中由 pipeline.py 调用）：
   1. 从本地视频文件提取音轨（ffmpeg）
-  2. 计算各项指标
-  3. 综合评分输出 audio_score + audio_label + audio_reasons
+  2. 依次检查各项指标
+  3. 任一不通过立即返回拒绝结果
+  4. 全部通过后输出 audio_score=1.0 + audio_label="clear_music"
 """
 
 from __future__ import annotations
@@ -212,7 +221,7 @@ class AudioQualityScorer:
     # ------------------------------------------------------------------
 
     def _analyze_audio(self, audio_path: str, bvid: str = "") -> AudioScoreResult:
-        """加载音频并计算各项指标（启发式模式）。"""
+        """加载音频并逐项检查质量指标（硬性筛选模式）。"""
         y, sr = self._load_audio(audio_path)
         if y is None or len(y) == 0:
             logger.warning("Empty audio signal for bvid=%s", bvid)
@@ -220,89 +229,129 @@ class AudioQualityScorer:
 
         reasons: list[str] = []
         stats = AudioStats()
+        cfg = self._cfg
 
         # ---- 1. 非静音占比 ----
         audio_present_ratio = self._calc_audio_present_ratio(y, sr)
         stats.audio_present_ratio = round(audio_present_ratio, 4)
 
-        if audio_present_ratio < self._cfg.min_audio_present_ratio:
+        if audio_present_ratio < cfg.min_audio_present_ratio:
             reasons.append(
-                f"REJECT:low_audio_present_ratio({audio_present_ratio:.2f} "
-                f"< {self._cfg.min_audio_present_ratio:.2f})"
+                f"REJECT:insufficient_audio({audio_present_ratio:.2f} "
+                f"< {cfg.min_audio_present_ratio:.2f})"
             )
-            result = AudioScoreResult(
-                audio_score=0.1,
-                audio_label="low_volume",
+            return AudioScoreResult(
+                audio_score=0.0,
+                audio_label="insufficient_audio",
                 audio_reasons=reasons,
                 audio_stats=stats,
             )
-            return result
 
-        # ---- 2. 平均响度（LUFS 近似 via RMS）----
+        # ---- 2. 平均响度 ----
         loudness_mean, loudness_stability = self._calc_loudness(y, sr)
         stats.loudness_mean = round(loudness_mean, 2)
         stats.loudness_stability = round(loudness_stability, 4)
 
-        if loudness_mean < self._cfg.min_loudness_mean:
+        if loudness_mean < cfg.min_loudness_mean:
             reasons.append(
-                f"WARN:low_loudness({loudness_mean:.1f} dB < {self._cfg.min_loudness_mean:.1f} dB)"
+                f"REJECT:low_loudness({loudness_mean:.1f} dB < {cfg.min_loudness_mean:.1f} dB)"
+            )
+            return AudioScoreResult(
+                audio_score=0.0,
+                audio_label="low_loudness",
+                audio_reasons=reasons,
+                audio_stats=stats,
             )
 
         # ---- 3. 削波比例 ----
         clipping_ratio = self._calc_clipping_ratio(y)
         stats.clipping_ratio = round(clipping_ratio, 4)
-        if clipping_ratio > self._cfg.max_clipping_ratio:
-            reasons.append(f"WARN:high_clipping({clipping_ratio:.3f})")
 
-        # ---- 4. 简易信噪比代理 ----
+        if clipping_ratio > cfg.max_clipping_ratio:
+            reasons.append(
+                f"REJECT:high_clipping({clipping_ratio:.3f} > {cfg.max_clipping_ratio:.3f})"
+            )
+            return AudioScoreResult(
+                audio_score=0.0,
+                audio_label="high_clipping",
+                audio_reasons=reasons,
+                audio_stats=stats,
+            )
+
+        # ---- 4. 信噪比 ----
         snr_proxy = self._calc_snr_proxy(y, sr)
         stats.snr_proxy = round(snr_proxy, 2)
 
-        # ---- 5. 语音占比（启发式）----
-        speech_ratio = self._heuristic_speech_ratio(y, sr)
-        stats.speech_ratio = round(speech_ratio, 4)
-        if speech_ratio > self._cfg.speech_ratio_max:
+        # 检查配置中是否有 min_snr_proxy（可选）
+        min_snr = getattr(cfg, 'min_snr_proxy', None)
+        if min_snr is not None and snr_proxy < min_snr:
             reasons.append(
-                f"WARN:high_speech_ratio({speech_ratio:.2f} > {self._cfg.speech_ratio_max:.2f})—"
-                f"may_contain_commentary/interview"
+                f"REJECT:low_snr({snr_proxy:.1f} dB < {min_snr:.1f} dB)"
+            )
+            return AudioScoreResult(
+                audio_score=0.0,
+                audio_label="low_snr",
+                audio_reasons=reasons,
+                audio_stats=stats,
             )
 
-        # ---- 6. 音乐置信度（启发式）----
+        # ---- 5. 语音占比 ----
+        speech_ratio = self._heuristic_speech_ratio(y, sr)
+        stats.speech_ratio = round(speech_ratio, 4)
+
+        if speech_ratio > cfg.speech_ratio_max:
+            reasons.append(
+                f"REJECT:speech_heavy({speech_ratio:.2f} > {cfg.speech_ratio_max:.2f})"
+            )
+            return AudioScoreResult(
+                audio_score=0.0,
+                audio_label="speech_heavy",
+                audio_reasons=reasons,
+                audio_stats=stats,
+            )
+
+        # ---- 6. 音乐置信度 ----
         music_conf = self._heuristic_music_confidence(y, sr)
         stats.music_confidence = round(music_conf, 4)
 
-        # ---- 7. 节拍强度（可选，需 librosa）----
+        # 检查配置中是否有 min_music_conf（可选）
+        min_music = getattr(cfg, 'min_music_conf', None)
+        if min_music is not None and music_conf < min_music:
+            reasons.append(
+                f"REJECT:weak_music_evidence({music_conf:.2f} < {min_music:.2f})"
+            )
+            return AudioScoreResult(
+                audio_score=0.0,
+                audio_label="weak_music_evidence",
+                audio_reasons=reasons,
+                audio_stats=stats,
+            )
+
+        # ---- 7. 节拍强度（可选，仅统计）----
         if _LIBROSA_AVAILABLE:
             beat_strength = self._calc_beat_strength(y, sr)
             stats.beat_strength = round(beat_strength, 4) if beat_strength is not None else None
         else:
             stats.beat_strength = None
 
-        # ---- 综合评分 ----
-        audio_score, audio_label = self._compute_audio_score(
-            audio_present_ratio=audio_present_ratio,
-            speech_ratio=speech_ratio,
-            music_conf=music_conf,
-            snr_proxy=snr_proxy,
-            clipping_ratio=clipping_ratio,
-            loudness_mean=loudness_mean,
-            loudness_stability=loudness_stability,
+        # ---- 所有检查通过 ----
+        reasons.append(
+            f"PASS:all_checks_passed(present={audio_present_ratio:.2f}, "
+            f"loudness={loudness_mean:.1f}dB, clipping={clipping_ratio:.3f}, "
+            f"snr={snr_proxy:.1f}dB, speech={speech_ratio:.2f}, music={music_conf:.2f})"
         )
-        reasons.append(f"audio_score={audio_score:.3f} label={audio_label}")
 
-        logger.debug(
-            "AudioScorer bvid=%s: score=%.3f label=%s speech=%.2f music=%.2f snr=%.1f",
+        logger.info(
+            "AudioScorer bvid=%s: PASS label=clear_music speech=%.2f music=%.2f snr=%.1f",
             bvid,
-            audio_score,
-            audio_label,
             speech_ratio,
             music_conf,
             snr_proxy,
         )
 
         return AudioScoreResult(
-            audio_score=round(audio_score, 4),
-            audio_label=audio_label,
+            audio_score=1.0,
+            audio_label="clear_music",
             audio_reasons=reasons,
             audio_stats=stats,
         )
@@ -514,72 +563,7 @@ class AudioQualityScorer:
         except Exception:
             return None
 
-    # ------------------------------------------------------------------
-    # 综合评分
-    # ------------------------------------------------------------------
 
-    def _compute_audio_score(
-        self,
-        audio_present_ratio: float,
-        speech_ratio: float,
-        music_conf: float,
-        snr_proxy: float,
-        clipping_ratio: float,
-        loudness_mean: float,
-        loudness_stability: float,
-    ) -> tuple[float, str]:
-        """综合所有指标输出 audio_score 和 audio_label。
-
-        Returns:
-            (score, label)
-        """
-        cfg = self._cfg
-        score = 0.5  # 基础分
-
-        # 音乐置信度加分
-        score += 0.25 * music_conf
-
-        # 语音占比惩罚
-        if speech_ratio > cfg.speech_ratio_max:
-            penalty = min(0.4, (speech_ratio - cfg.speech_ratio_max) * 1.2)
-            score -= penalty
-
-        # SNR 加分（越高越好，30 dB 为参考满分）
-        snr_score = min(1.0, max(0.0, snr_proxy / 30.0))
-        score += 0.10 * snr_score
-
-        # 削波惩罚
-        if clipping_ratio > cfg.max_clipping_ratio:
-            score -= min(0.2, clipping_ratio * 5)
-
-        # 响度合理范围 -35 ~ -15 dBRMS
-        if -35 <= loudness_mean <= -5:
-            score += 0.05
-        elif loudness_mean < cfg.min_loudness_mean:
-            score -= 0.15
-
-        # 稳定性加分
-        score += 0.05 * loudness_stability
-
-        # 非静音占比
-        score += 0.05 * audio_present_ratio
-
-        score = round(float(min(1.0, max(0.0, score))), 4)
-
-        # ---- 标签分配 ----
-        # 语音超过阈值且占主导（>= speech_ratio_max）-> speech_heavy
-        if speech_ratio >= cfg.speech_ratio_max and speech_ratio >= 0.35:
-            label = "speech_heavy"
-        elif audio_present_ratio < 0.3 or loudness_mean < cfg.min_loudness_mean:
-            label = "low_volume"
-        elif clipping_ratio > cfg.max_clipping_ratio * 3:
-            label = "noisy_audio"
-        elif score >= cfg.audio_threshold:
-            label = "clear_music"
-        else:
-            label = "uncertain_audio"
-
-        return score, label
 
 
 # ---------------------------------------------------------------------------

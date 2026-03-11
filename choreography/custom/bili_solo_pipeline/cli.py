@@ -287,7 +287,7 @@ def main(argv: list[str] | None = None) -> None:
     logger = logging.getLogger(__name__)
     logger.info("bili-solo-pipeline starting. Args: %s", vars(args))
 
-    # 构建配置（从 DEFAULT 开始，逐步覆盖）
+    # 读入DEFAULT_CONFIG的配置
     import dataclasses
     cfg_fields = {f.name: getattr(DEFAULT_CONFIG, f.name)
                   for f in dataclasses.fields(DEFAULT_CONFIG)}
