@@ -93,7 +93,7 @@ class MCTall():
             # 必须使用 .module 绕过 DataParallel 的分发机制，直接在单卡上初始化参数
             # 如果 gpt 不是 DataParallel，直接调用 gpt 即可
             gpt_inner = gpt.module if isinstance(gpt, torch.nn.DataParallel) else gpt
-            _ = gpt_inner(quants_input_d, music_seq_d[:, config.ds_rate//music_relative_rate:], text_upper_seq_d, text_lower_seq_d, text_torso_seq_d, text_whole_seq_d, text_simple_tag_seq_d, text_meta_seq_d, quants_target_d)
+            _ = gpt_inner(idxs=quants_input_d, music=music_seq_d[:, config.ds_rate//music_relative_rate:], text_upper=text_upper_seq_d, text_lower=text_lower_seq_d, text_torso=text_torso_seq_d, text_whole=text_whole_seq_d, text_simple_tag=text_simple_tag_seq_d, text_meta=text_meta_seq_d, targets=quants_target_d)
             print("Dummy forward pass finished. Lazy modules initialized.")
         
         # Checkpoint and Start Epoch
@@ -104,22 +104,12 @@ class MCTall():
             checkpoint = torch.load(config.init_weight)
             gpt.load_state_dict(checkpoint['model'], strict=False)
 
-            try:
-                # 使用正则寻找 epoch_ 后面的数字
-                match = re.search(r'epoch_(\d+)\.pt', config.init_weight)
-                if match:
-                    loaded_epoch = int(match.group(1))
-                    start_epoch = loaded_epoch + 1
-                    print(f"Detected checkpoint epoch: {loaded_epoch}. Resuming training from epoch {start_epoch}...")
-                else:
-                    # 如果文件名里没有 epoch，尝试从 checkpoint 字典里找 (如果有保存的话)
-                    if 'epoch' in checkpoint:
-                        start_epoch = checkpoint['epoch'] + 1
-                        print(f"Loaded epoch from checkpoint dict. Resuming from {start_epoch}...")
-            except Exception as e:
-                print(f"Could not parse epoch from checkpoint, starting from {start_epoch}. Error: {e}")
-
-        # self.model.eval()
+            
+            match = re.search(r'epoch_(\d+)\.pt', config.init_weight)
+            loaded_epoch = int(match.group(1))
+            start_epoch = loaded_epoch + 1
+            print(f"Detected checkpoint epoch: {loaded_epoch}. Resuming training from epoch {start_epoch}...")
+            
 
         random.seed(config.seed)
         torch.manual_seed(config.seed)
@@ -222,7 +212,7 @@ class MCTall():
             if epoch_i % config.save_per_epochs == 0 or epoch_i == 1:
                 filename = os.path.join(self.ckptdir, f'epoch_{epoch_i}.pt')
                 torch.save(checkpoint, filename)
-            # Eval
+            # 可视化？
             if epoch_i % config.test_freq == 0:
                 with torch.no_grad():
                     print("Evaluation...")
@@ -267,41 +257,18 @@ class MCTall():
                         # block_size = gpt.module.get_block_size()
 
                         zs = gpt.module.sample(x, music_seq, text_upper_seq, text_lower_seq, text_torso_seq, text_whole_seq, text_simple_tag_seq, text_meta_seq, shift=config.sample_shift if hasattr(config, 'sample_shift') else None)
-                        # jj = 0
-                        # for k in range(music_seq.size(1)):
-                        #     x_cond = x if x.size(1) <= block_size else x[:, -block_size:] # crop context if needed
-                        #     music_seq_input = music_seq[:, :k+1] if k < block_size else music_seq[:, k-block_size+1:k+1]
-                        #     # print(x_cond.size())
-                        #     # print(music_seq_input.size())
-                        #     logits, _ = gpt(x_cond, music_seq_input)
-                        #     # jj += 1
-                        #     # pluck the logits at the final step and scale by temperature
-                        #     logits = logits[:, -1, :]
-                        #     # optionally crop probabilities to only the top k options
-                        #     # if top_k is not None:
-                        #     #     logits = top_k_logits(logits, top_k)
-                        #     # apply softmax to convert to probabilities
-                        #     probs = F.softmax(logits, dim=-1)
-                        #     # sample from the distribution or take the most likely
-                        #     # if sample:
-                        #     #     ix = torch.multinomial(probs, num_samples=1)
-                        #     # else:
-                        #     _, ix = torch.topk(probs, k=1, dim=-1)
-                        #     # append to the sequence and continue
-                        #     x = torch.cat((x, ix), dim=1)
-
-                        # zs = [x]
                         pose_sample = vqvae.module.decode(zs)
 
                         if config.global_vel:
                             # print('!!!!!')
-                            global_vel = pose_sample[:, :, :3].clone()
-                            pose_sample[:, 0, :3] = 0
+                            global_vel = pose_sample[:, :, :3].clone() # 取出速度
+                            pose_sample[:, 0, :3] = 0 # 第0帧从原点出发
                             for iii in range(1, pose_sample.size(1)):
-                                pose_sample[:, iii, :3] = pose_sample[:, iii-1, :3] + global_vel[:, iii-1, :]
+                                pose_sample[:, iii, :3] = pose_sample[:, iii-1, :3] + global_vel[:, iii-1, :] # 位置[t] = 位置[t-1] + 速度[t-1]
 
                         if isinstance(zs, tuple):
                             quants_out[self.dance_names[i_eval]] = tuple(zs[ii][0].cpu().data.numpy()[0] for ii in range(len(zs)))
+                            # zs[ii]: 第ii个身体部位的token list; [0]: 第0个量化层的token张量；后面的[0]: batch第0条
                         else:
                             quants_out[self.dance_names[i_eval]] = zs[0].cpu().data.numpy()[0]
                     
@@ -316,6 +283,7 @@ class MCTall():
             with torch.no_grad():
                 for val_batch in test_loader:
                     v_music, v_pose, v_text_upper, v_text_lower, v_text_torso, v_text_whole, v_text_simple_tag, v_text_meta = val_batch
+                    self._assert_text_modalities(v_text_upper, v_text_lower, v_text_torso, v_text_whole, v_text_simple_tag)
                     v_music = v_music.to(self.device)
                     v_pose  = v_pose.to(self.device)
                     v_pose[:, :, :3] = 0
@@ -399,6 +367,7 @@ class MCTall():
                     text_upper_seq = text_lower_seq = text_torso_seq = text_whole_seq = text_simple_tag_seq = text_meta_seq = None
                 else:
                     music_seq, pose_seq, text_upper_seq, text_lower_seq, text_torso_seq, text_whole_seq, text_simple_tag_seq, text_meta_seq = batch_eval
+                    self._assert_text_modalities(text_upper_seq, text_lower_seq, text_torso_seq, text_whole_seq, text_simple_tag_seq, text_meta_seq)
                     music_seq = music_seq.to(self.device)
                     pose_seq = pose_seq.to(self.device)
                     text_upper_seq = text_upper_seq.to(self.device) if text_upper_seq is not None else None
@@ -440,7 +409,7 @@ class MCTall():
 
                 # block_size = gpt.module.get_block_size()
 
-                zs = gpt.module.sample(x, cond=music_seq, text_upper=text_upper_seq, text_lower=text_lower_seq, text_torso=text_torso_seq, text_whole=text_whole_seq, text_simple_tag=text_simple_tag_seq, text_meta=text_meta_seq, shift=config.sample_shift if hasattr(config, 'sample_shift') else None)
+                zs = gpt.module.sample(xs=x, cond=music_seq, text_upper=text_upper_seq, text_lower=text_lower_seq, text_torso=text_torso_seq, text_whole=text_whole_seq, text_simple_tag=text_simple_tag_seq, text_meta=text_meta_seq, shift=config.sample_shift if hasattr(config, 'sample_shift') else None)
 
                 pose_sample = vqvae.module.decode(zs)
 
@@ -690,8 +659,7 @@ class MCTall():
             collate_fn=text_collate_fn
         )
         self.dance_names = dance_names
-        #pdb.set_trace()
-        #self.training_data = self.test_loader
+        
 
     def _build_optimizer(self):
         #model = nn.DataParallel(model).to(device)
@@ -749,7 +717,7 @@ class MCTall():
         
 def prepare_dataloader(music_data, dance_data, texts_upper, texts_lower, texts_torso, texts_whole, texts_simple_tag, texts_meta, batch_size,
                        not_use_upper=False, not_use_lower=False, not_use_torso=False, not_use_whole=False, not_use_simple_tag=False):
-    print('hi there')
+    # print('hi there')
     data_loader = torch.utils.data.DataLoader(
         MoDaSeq(music_data, dance_data, texts_upper, texts_lower, texts_torso, texts_whole, texts_simple_tag, texts_meta,
                 not_use_upper=not_use_upper, not_use_lower=not_use_lower,

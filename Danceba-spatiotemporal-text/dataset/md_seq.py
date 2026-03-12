@@ -115,6 +115,7 @@ class MoDaSeq(Dataset):
         self.texts_whole = texts_whole
         self.texts_simple_tag = texts_simple_tag
         self.texts_meta = texts_meta
+        
         # not_use_* flags: when True, __getitem__ always returns None for that modality
         self.not_use_upper = not_use_upper
         self.not_use_lower = not_use_lower
